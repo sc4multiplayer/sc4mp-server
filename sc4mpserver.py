@@ -34,6 +34,7 @@ try:
 except ImportError:
 	sc4mp_has_pystray = False
 
+import core.networking
 from core.config import *
 from core.dbpf import *
 from core.networking import *
@@ -106,6 +107,7 @@ SC4MP_CONFIG_DEFAULTS = [
 		("max_request_threads", 200),
 		("connection_timeout", 600),
 		("filetable_update_interval", 600),
+		("max_message_size", SC4MP_MAX_JSON_SIZE),
 	]),
 	("BACKUPS", [
 		("server_backup_interval", 6),
@@ -758,6 +760,8 @@ def update_config_constants(config):
 	SC4MP_SERVER_ID = config['INFO']['server_id']
 	SC4MP_SERVER_NAME = config['INFO']['server_name']
 	SC4MP_SERVER_DESCRIPTION = config['INFO']['server_description']
+
+	core.networking.SC4MP_MAX_JSON_SIZE = config['PERFORMANCE']['max_message_size']
 
 
 def restore(filename):
