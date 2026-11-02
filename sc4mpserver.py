@@ -2323,13 +2323,15 @@ class RequestHandler(th.Thread):
 				else:
 					print("[WARNING] Invalid request!") # (\"{request}\")!")
 
-				c.close()
-			
 				#report("- connection closed.", self)
 
 			except Exception as e:
 
 				show_error(e)
+
+			finally:
+
+				self.c.close()
 
 			sc4mp_request_threads -= 1
 
