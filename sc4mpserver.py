@@ -131,6 +131,9 @@ SC4MP_CONFIG_DEFAULTS = [
 		("backup_server_on_startup", True),
 		("max_server_backup_days", 30),
 		("max_savegame_backups", 20),
+	]),
+	("UPDATES", [
+		("auto_update", True),
 	])
 ]
 
@@ -1358,7 +1361,7 @@ class Server(th.Thread):
 		# `-k` and `-u` are for the check at startup only (servers are restarted with `-k` after an update, so they still update later)
 		force_update = sc4mp_force_update and not periodic
 
-		if periodic or not sc4mp_skip_update:
+		if force_update or (sc4mp_config["UPDATES"]["auto_update"] and (periodic or not sc4mp_skip_update)):
 
 			print("Checking for updates...")
 
