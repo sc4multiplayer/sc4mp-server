@@ -24,379 +24,306 @@ To compile the source code, run the `setup.py` script.
 
 This section is meant for developers using the SC4MP protocol. Here you can find examples of requests and responses from the server, useful for creating a server scanner or client appplication for the SC4MP network.
 
-**WARNING**: This protocol is slated to be completely rewritten in v0.9.
+The SC4MP protocol is a lightweight, binary-framed JSON-based protocol designed for reliable TCP communication between SC4MP clients and servers. All messages begin with a **16-byte fixed header** followed by a variable-length JSON payload.
 
-## Add server
-Adds the requesting server to the requested server's server list queue.
-
-#### Request
-```
-add_server <port>
-```
-
-#### Response
-none
+Communication uses **request-response** semantics — every client request expects a corresponding server response with the same command code.
 
 
-## Check password
-Returns "y" if the password provided is correct, otherwise "n".
+---
 
-#### Request
+## Message Structure
+
+| Section | Size | Description |
+|----------|------|-------------|
+| Protocol Identifier | 5 bytes | Always `"SC4MP"` |
+| Message Type | 3 bytes | `"Req"` for requests, `"Res"` for responses |
+| Command Code | 6 bytes | ASCII command name, null-padded |
+| Header Length | 2 bytes | Unsigned short (`H`, little-endian), specifies length of JSON payload (0 for no headers) |
+| Headers | Variable | UTF-8 JSON-encoded key-value pairs |
+
+Every response also carries the server's info headers (the same ones as the `Info` response). When a request fails, the response has an `error` header with the reason instead, eg. `{"error": "Incorrect password."}`.
+
+Some commands send more data after the response, either as a **length-prefixed JSON** value (a 4-byte unsigned int, little-endian, giving the length of the UTF-8 JSON that follows) or as raw bytes. File tables are lists of `["<md5>", <filesize>, "<relative_path>"]` entries.
+
+### Authentication
+
+`Save`, `Token`, `Subscr` and `Chat` (and, on private servers, `PlgTbl`, `PlgDat`, `RgnTbl` and `RgnDat`) need these request headers:
+```json
+{"version": "<client version>", "user_id": "<uuid>", "password": "<password>"}
 ```
-check_password <password>
+`password` is only checked when the server has one. Clients older than the server's major and minor version are refused.
+
+
+---
+
+## Commands
+
+### COMMAND_ADD_SERVER (`AddSrv`)
+Adds the requesting server to another server’s list. If `host` is empty, the address the request came from is used. Fails if the server isn't discoverable.
+
+**Request:**
+```json
+{"host": "<hostname>", "port": <port>}
 ```
 
-#### Response
-```
-y
-```
-or
-```
-n
+**Response:**
+```json
+{"status": "success"}
 ```
 
+---
 
-## Info
-Returns server info in a JSON dictionary.
+### COMMAND_CHECK_PASSWORD (`ChkPwd`)
+Verifies a server password.
 
-#### Request
-```
-info
+**Request:**
+```json
+{"password": "<password>"}
 ```
 
-#### Response
+**Response:**
+```json
+{"status": "success"}  // or {"status": "failure"}
 ```
-{  
-    "server_id": <server_id>,  
-    "server_name": <server_name>,  
-    "server_description": <server_description>,  
-    "server_url": <server_url>,  
-    "server_version": <server_version>,  
-    "private": <private>,  
-    "password_enabled": <password_enabled>,  
-    "user_plugins_enabled": <user_plugins_enabled>  
+
+---
+
+### COMMAND_INFO (`Info`)
+Retrieves general server information.
+
+**Request:**
+```json
+{}
+```
+
+**Response:**
+```json
+{
+  "server_id": "<string>",
+  "server_name": "<string>",
+  "server_description": "<string>",
+  "server_url": "<string>",
+  "server_version": "<string>",
+  "private": <bool>,
+  "password_enabled": <bool>,
+  "user_plugins_enabled": <bool>,
+  "claim_duration": <int or null>,
+  "max_region_claims": <int or null>,
+  "godmode_filter": <bool>,
+  "chat_enabled": <bool>,
+  "guest_chat": <bool>,
+  "time": "YYYY-MM-DD HH:MM:SS"
 }
 ```
 
+---
 
-## Password enabled
-Returns "y" if the server requires a password, otherwise "n".
+### COMMAND_PASSWORD_ENABLED (`PwdEnb`)
+Checks if the server requires a password.
 
-#### Request
-```
-password_enabled
-```
-
-#### Response
-```
-y
-```
-or
-```
-n
+**Response:**
+```json
+{"password_enabled": true}
 ```
 
+---
 
-## Ping
-Returns "pong".
+### COMMAND_PING (`Ping`)
+Verifies connectivity.
 
-#### Request
-```
-ping
-```
-
-#### Response
-```
-pong
+**Response:**
+```json
+{}
 ```
 
+---
 
-## Plugins
-Requests plugins from the server.
+### COMMAND_PLUGINS_TABLE (`PlgTbl`)
+Retrieves a list of available plugin files.
 
-#### Request
+**Response:**
+```json
+{}
 ```
-plugins
-```
-or
-```
-plugins <version> <user_id> <password>
-```
-
-#### Response
-```
+Followed by the file table as length-prefixed JSON:
+```json
 [
-	[<file_1_md5>, <file_1_size>, <file_1_relpath>],
-	[<file_2_md5>, <file_2_size>, <file_2_relpath>],
-	...
-	[<file_n_md5>, <file_n_size>, <file_n_relpath>]
+  ["<md5>", <filesize>, "<relative_path>"],
+  ...
 ]
 ```
 
-#### Request
+---
+
+### COMMAND_PLUGINS_DATA (`PlgDat`)
+Requests actual plugin data after receiving a plugin table.
+
+**Sequence:**
+1. Request, and the server responds with `{}`.
+2. The client sends the entries it wants, from the file table, as length-prefixed JSON.
+3. The server sends the files' raw data, one after another, in the same order. It closes the connection instead if an entry isn't in its file table.
+
+---
+
+### COMMAND_PRIVATE (`Prv`)
+Indicates whether plugin and region access requires authentication.
+
+**Response:**
+```json
+{"private": true}
 ```
+
+---
+
+### COMMAND_REGIONS_TABLE (`RgnTbl`)
+Retrieves a list of available region files.
+
+**Response:**
+```json
+{}
+```
+Followed by the file table as length-prefixed JSON:
+```json
 [
-    [<file_1_md5>, <file_1_size>, <file_1_relpath>],
-    [<file_2_md5>, <file_2_size>, <file_2_relpath>],
-    ...
-    [<file_n_md5>, <file_n_size>, <file_n_relpath>]
+  ["<md5>", <filesize>, "<relative_path>"],
+  ...
 ]
 ```
 
-#### Response
-```
-<file_1_data>
-<file_2_data>
-...
-<file_n_data>
+---
+
+### COMMAND_REGIONS_DATA (`RgnDat`)
+Requests actual region data after receiving a region table.
+
+**Sequence:**
+1. Request, and the server responds with `{}`.
+2. The client sends the entries it wants, from the file table, as length-prefixed JSON.
+3. The server sends the files' raw data, one after another, in the same order. It closes the connection instead if an entry isn't in its file table.
+
+---
+
+### COMMAND_SAVE (`Save`)
+Pushes a region save to the server.
+
+**Sequence:**
+1. Request with the authentication headers, and the server responds with `{}`.
+2. The client sends the region name and the size of each savegame as length-prefixed JSON: `["<region>", [<filesize>, ...]]`.
+3. The client sends the savegames' raw data, one after another.
+4. The server responds again with the result, which is `"ok"` if the save was accepted, or else the reason it wasn't (eg. `"City already claimed."`):
+```json
+{"result": "ok"}
 ```
 
+---
 
-## Private
-Returns "y" if the server's plugins and regions require a request header, otherwise "n".
+### COMMAND_SERVER_LIST (`SrvLst`)
+Retrieves the global SC4MP server list. Fails if the server isn't discoverable.
 
-#### Request
+**Response:**
+```json
+{}
 ```
-private
-```
-
-#### Response
-```
-y
-```
-or
-```
-n
-```
-
-
-## Regions
-Requests regions from the server.
-
-#### Request
-```
-regions
-```
-or
-```
-regions <version> <user_id> <password>
-```
-
-#### Response
-```
+Followed by the server list as length-prefixed JSON:
+```json
 [
-	[<file_1_md5>, <file_1_size>, <file_1_relpath>],
-	[<file_2_md5>, <file_2_size>, <file_2_relpath>],
-	...
-	[<file_n_md5>, <file_n_size>, <file_n_relpath>]
+  ["<host1>", <port1>],
+  ["<host2>", <port2>],
+  ...
 ]
 ```
 
-#### Request
-```
-[
-    [<file_1_md5>, <file_1_size>, <file_1_relpath>],
-    [<file_2_md5>, <file_2_size>, <file_2_relpath>],
-    ...
-    [<file_n_md5>, <file_n_size>, <file_n_relpath>]
-]
+---
+
+### COMMAND_USER_ID (`UserId`)
+Validates user identity by checking a hashed token.
+
+**Request:**
+```json
+{"hash": "<sha256(user_id + token)>"} 
 ```
 
-#### Response
-```
-<file_1_data>
-<file_2_data>
-...
-<file_n_data>
+**Response:**
+```json
+{"status": "success", "user_id": "<uuid>"}  // or {"status": "failure"}
 ```
 
+---
 
-## Save
-Pushes a save to the server.
+### COMMAND_TOKEN (`Token`)
+Requests a random token for authentication.
 
-#### Request
-```
-save <version> <user_id> <password>
-```
-
-#### Response
-```
-ok
+**Request:**
+```json
+{"user_id": "<uuid>"}
 ```
 
-#### Request
-```
-[
-	<region_name>,
-	[
-		<file_1_size>,
-		<file_2_size>,
-		...
-		<file_n_size>
-	]
-]
+**Response:**
+```json
+{"token": "<random_string>"}
 ```
 
-#### Response
-```
-ok
+---
+
+### COMMAND_TIME (`Time`)
+Retrieves the current server time.
+
+**Response:**
+```json
+{"time": "YYYY-MM-DD HH:MM:SS"}
 ```
 
-#### Request
+---
+
+### COMMAND_LOADING_BACKGROUND (`LdgBkg`)
+Retrieves the loading background image data.
+
+**Response:**
+```json
+{"size": <integer>}
 ```
-<data>
+Followed by a binary payload of `<size>` bytes.
+
+---
+
+### COMMAND_SUBSCRIBE (`Subscr`)
+Subscribes to the server's events (chat messages, players joining and leaving, and new cities) and keeps the connection open to stream them. Requires the user authentication headers. When the server has a password, players without it can still subscribe as guests if the server allows guest chat.
+
+**Request:**
+```json
+{"version": "<client version>", "user_id": "<uuid>", "password": "<password>"}
 ```
 
-#### Response
+**Response:**
+```json
+{"status": "success"}
 ```
-<message>
+Followed by a stream of responses on the same connection, each with a list of events (an empty list every few seconds while nothing happens):
+```json
+{"events": [{"event": "<event type>", ...}, ...]}
+```
+The first events are the recent chat history, each marked `"history": true`, followed by a `welcome` event. The events are:
+```json
+{"event": "chat", "user_id": "<uuid>", "name": "<mayor name>", "message": "<text>", "time": <seconds since the epoch>, "city": "<city name>", "region": "<region>"}
+{"event": "city_founded", "user_id": "<uuid>", "name": "<mayor name>", "city": "<city name>", "region": "<region>", "coords": [<x>, <y>], "reclaimed": <bool>, "time": <seconds since the epoch>}
+{"event": "user_join", "user_id": "<uuid>", "name": "<mayor name>"}
+{"event": "user_leave", "user_id": "<uuid>", "name": "<mayor name>"}
+{"event": "welcome", "server_name": "<string>", "motd": "<string>"}
+```
+`city` and `region` on `chat` events are only sent for players who have saved a city, and `motd` only when the server has a message of the day. `reclaimed` is `true` when a player took over another mayor's city.
+
+---
+
+### COMMAND_CHAT (`Chat`)
+Sends a chat message to every subscribed player. Requires the user authentication headers (guests may chat if the server allows it). Messages can be up to 500 characters long, and a player can send up to 5 messages every 5 seconds.
+
+**Request:**
+```json
+{"version": "<client version>", "user_id": "<uuid>", "password": "<password>", "message": "<text>"}
 ```
 
-
-## Server description
-Returns the server description.
-
-#### Request
-```
-server_description
+**Response:**
+```json
+{"status": "success"}  // or {"error": "<reason>"}, eg. "You're sending messages too quickly. Wait a few seconds."
 ```
 
-#### Response
-```
-<server_description>
-```
-
-
-## Server ID
-Returns the server ID.
-
-#### Request
-```
-server_id
-```
-
-#### Response
-```
-<server_id>
-```
-
-
-## Server list
-Returns the server list in a 2d JSON array.
-
-#### Request
-```
-server_list
-```
-
-#### Response
-```
-[  
-    [<server_1_host>, <server_1_port>],  
-    [<server_2_host>, <server_2_port>],  
-    ...  
-    [<server_n_host>, <server_n_port>]  
-]  
-```
-
-
-## Server name
-Returns the server name.
-
-#### Request
-```
-server_name
-```
-
-#### Response
-```
-<server_name>
-```
-
-
-## Server URL
-Returns the server URL.
-
-#### Request
-```
-server_url
-```
-
-#### Response
-```
-<server_url>
-```
-
-
-## Server version
-Returns the version of the SC4MP Server that the server is running on.
-
-#### Request
-```
-server_version
-```
-
-#### Response
-```
-<server_version as major.minor.patch>
-```
-
-
-## Time
-Returns the time in the server's timezone.
-
-#### Request
-```
-time
-```
-
-#### Response
-```
-<time as Y-m-d H:M:S>
-```
-
-
-## Token
-Returns a radomized token that is used for server verification.
-
-#### Request
-```
-token <version> <user_id> <password>
-```
-
-#### Response
-```
-<token>
-```
-
-
-## User ID
-Returns a user_id from an SHA-256 hash of a concatenation of the user_id and client-side token. Used to verify that the server has the user ID on record.
-
-#### Request
-```
-user_id <hash>
-```
-
-#### Response
-```
-<user_id>
-```
-
-
-## User plugins enabled
-Returns "y" if user plugins are permitted, otherwise "n".
-
-#### Request
-```
-user_plugins_enabled
-```
-
-#### Response
-```
-y
-```
-or
-```
-n
-```
+---
