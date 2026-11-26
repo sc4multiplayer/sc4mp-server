@@ -78,6 +78,7 @@ SC4MP_DELAY = .1
 SC4MP_FILESTREAM_TIMEOUT = 60	# seconds a launcher sending or receiving files can pause for (eg. while it writes a file), however low `connection_timeout` is
 
 SC4MP_CHAT_MAX_LENGTH = 500
+SC4MP_CHAT_NAME_MAX_LENGTH = 50	# characters of a mayor name shown in chat
 SC4MP_CHAT_RATE = (5, 5)	# players can send this many chat messages in this many seconds
 SC4MP_STOP_TIMEOUT = 30	# seconds to wait for a running server to stop before ending it by force
 SC4MP_UPDATE_CHECK_INTERVAL = 6 * 3600	# seconds between update checks while the server runs
@@ -3266,6 +3267,9 @@ class RequestHandler(BaseRequestHandler):
 		size = 0
 		for event in events:
 			event_size = len(json.dumps(event)) + 2
+			if event_size > max_size:
+				print(f"[WARNING] Skipping an event too large to send ({event_size} bytes).")	# eg. from before names were shortened, which would end every subscription
+				continue
 			if chunk and size + event_size > max_size:
 				yield chunk
 				chunk = []
@@ -3327,7 +3331,7 @@ class RequestHandler(BaseRequestHandler):
 		# The city the player saved most recently, shown next to their name
 		if not self.guest:
 			region, entry = self.get_latest_claim(self.user_id, "city_name")
-			city = self.filter_chat(" ".join(str((entry or {}).get("city_name") or "").split())[:SC4MP_CHAT_MAX_LENGTH])
+			city = self.filter_chat(self.clean_chat_text((entry or {}).get("city_name"), SC4MP_CHAT_MAX_LENGTH))
 			if city:
 				event.update(city=city, region=region)
 		self.push_chat_event('chat', event)
@@ -3367,7 +3371,7 @@ class RequestHandler(BaseRequestHandler):
 			return
 
 		name = self.get_chat_name(self.user_id)
-		city = self.filter_chat(" ".join(str(claim['city'] or "").split())[:SC4MP_CHAT_MAX_LENGTH]) or "a city"
+		city = self.filter_chat(self.clean_chat_text(claim['city'], SC4MP_CHAT_MAX_LENGTH)) or "a city"
 
 		action = "founded"
 		if claim['reclaimed']:
@@ -3381,6 +3385,18 @@ class RequestHandler(BaseRequestHandler):
 			**claim,
 			'city': city,
 		})
+
+
+	@staticmethod
+	def clean_chat_text(text, max_length):
+		"""Removes control characters and extra whitespace from a name (eg. a city or mayor name from a savegame), and shortens it to `max_length` characters."""
+
+		return " ".join(
+			"".join(
+				character if character.isprintable() else " "
+				for character in str(text or "")
+			).split()
+		)[:max_length]
 
 
 	@staticmethod
@@ -3439,9 +3455,9 @@ class RequestHandler(BaseRequestHandler):
 
 			# Keep the name if no claim was found, since a `region.json` may not be readable while it's being written
 			if mayor_name is None and entry.get("chat_mayor_name"):
-				return entry["chat_mayor_name"]
+				return self.clean_chat_text(entry["chat_mayor_name"], SC4MP_CHAT_NAME_MAX_LENGTH) or "Defacto"
 
-			mayor_name = self.filter_chat(mayor_name or "") or "Defacto"
+			mayor_name = self.filter_chat(self.clean_chat_text(mayor_name, SC4MP_CHAT_NAME_MAX_LENGTH)) or "Defacto"
 
 			if entry.get("chat_mayor_name") != mayor_name or "chat_name" in entry:
 				entry["chat_mayor_name"] = mayor_name
