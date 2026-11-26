@@ -705,7 +705,11 @@ def export(export_type):
 				pass	# eg. a new file, or links aren't supported, so it's copied
 		return shutil.copy2(source, destination_file)
 
-	shutil.copytree(target, destination, ignore=shutil.ignore_patterns('_Backups'), copy_function=copy_file) #, '_Database'))	
+	try:
+		shutil.copytree(target, destination, ignore=shutil.ignore_patterns('_Backups'), copy_function=copy_file) #, '_Database'))	
+	except Exception:
+		shutil.rmtree(destination, ignore_errors=True)	# so an export that keeps failing doesn't leave a new folder each time it's retried
+		raise
 
 	# Don't send the `Downloads` folder to clients, since it isn't a region
 	if export_type == "regions":
@@ -2476,8 +2480,8 @@ class RegionsManager(th.Thread):
 								# Report an error to the request handler
 								self.outputs[save_id] = "Unexpected server-side error."
 
-								# Raise the exception so that it appears in the server's output
-								raise e
+								# Show the error, but carry on with the next task, since the other players' saves are waiting
+								show_error(e)
 
 							finally:
 
@@ -3015,6 +3019,8 @@ class RequestHandler(BaseRequestHandler):
 			error = "Too many files."
 		elif max(file_sizes) > 500_000_000:
 			error = "File too large."
+		elif not region or not os.path.isdir(os.path.join(sc4mp_server_path, "Regions", region)):
+			error = "Invalid region."
 
 		if error is not None:
 			discard_bytes(c, sum(file_sizes))
