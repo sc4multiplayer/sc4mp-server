@@ -14,7 +14,7 @@
             <h3>Installation</h3>
                 <p>SC4MP Server can be installed to any directory of your choosing.</p>
             <h3>Running your server</h3>
-                <p>Run the executable named "sc4mpserver.exe", and the server will start in a console window. A subdirectory named "_SC4MP" will be created in your install directory which contains all the files pertaining to the functioning of your server. The server will begin listening for connections. Close the console window to shutdown the server.</p>
+                <p>Run the executable named "sc4mpserver.exe", and the server will start in a console window. A subdirectory named "_SC4MP" will be created in your install directory which contains all the files pertaining to the functioning of your server. The server will begin listening for connections. To stop the server, press Ctrl+C in the console window, or choose "Stop" from its icon in the system tray. Either way, it finishes the requests it's handling before it exits.</p>
             <h3>Testing your server</h3>
                 <p>With the server executable running, launch the SC4MP Launcher and open the direct connect window. Enter the host "localhost" and the default port 7240. Once connected to your server, you should see the default regions in-game. Close the game whenever you'd like. In the future you may use the hostname "localhost" and the server's port (7240 by default) whenever you'd like to connect to the server running on your local machine.</p>
             <h3>Adding plugins and regions</h3>
@@ -34,6 +34,7 @@
             <h3>Network</h3>
                 <p><b>host:</b> the hostname to bind to the TCP socket. The default value "0.0.0.0" will accept connections from any network adapter, and "127.0.0.1" will only accept connections from the local machine. This value should <b>NOT</b> be the IP address that players will use to connect to the server.</p>
                 <p><b>port:</b> the port to bind to the TCP socket. Players will need to know what port your server is running on in order to connect to your server. Be sure to also port forward using this port on your router.</b></p>
+                <p><b>domain:</b> the hostname that other servers should use to reach your server when they add it to their server lists (eg. a dynamic DNS hostname). Leave it empty to use the IP address your server connects from.</p>
                 <p><b>discoverable:</b> when set to "True", the server will synchronize its server list with the official servers, thus allowing your server to be displayed in the server browser. Set this setting to "False" if you would not like your server to be visible in the server browser.</p>
             <h3>Info</h3>
                 <p><b>server_id:</b> the public id that allows clients to identify your server. If you change this setting, be aware that players will not be able to access their previous claims!</p>
@@ -53,6 +54,7 @@
             <h3>Performance</h3>
                 <p><b>request_limit:</b> the maximum amount of requests a client can send in one minute. When the limit is exhausted, future connections from the client will be blocked for the rest of the minute. Set this value to "None" if you would like there to be no request limit.</p>
                 <p><b>max_request_threads:</b> the maximum amount of request threads that can be running at one time. Set the value to "None" if you would like there to be no limit.</p>
+				<p><b>connection_timeout:</b> the number of seconds the server waits for a client that stops responding before closing the connection.</p>
 				<p><b>filetable_update_interval:</b> the interval in seconds between filetable updates. A higher interval minimizes CPU and disk usage, but could cause errors if the server's plugins are modified while the server is running.</p>
 			<h3>Chat</h3>
 				<p>Players can chat with each other from the launcher and in game. Each player is named in chat by the mayor name of the last city they founded on your server, or else the latest mayor name they've saved a city with ("Defacto" if they have none). New cities, and cities taken over from other mayors, are also announced in chat. Messages can be up to 500 characters long, and a player can send up to 5 messages every 5 seconds.</p>
@@ -74,9 +76,13 @@
             <h3>Server logs</h3>
                 <p>Log files are saved to the installation directory and are named using the time when the server started up.</p>-->
         <h2>Launch parameters</h2>
-            <p><b>"--server-path [path]" option:</b> used to specify a custom path to store server data in besides "_SC4MP".</p>
-            <p><b>"--restore [path]" option:</b> restores the files from a backup json file found at the specified path.</p>
-            <p><b>"-prep" flag:</b> runs the server executable without starting the server.</p>
+            <p><b>"-s [path]" or "--server-path [path]" option:</b> used to specify a custom path to store server data in besides "_SC4MP". Several servers can run from one installation, each with its own server path.</p>
+            <p><b>"-t" or "--stop" flag:</b> stops the server running from the server path (Windows only). On Windows, starting a server from a server path that another server is already running from also stops that server first.</p>
+            <p><b>"-k" or "--skip-update" flag:</b> skips the update check at startup. The server still checks for updates every few hours while it runs, unless "auto_update" is set to "False".</p>
+            <p><b>"-u" or "--force-update" flag:</b> downloads and installs the latest release at startup, even if "auto_update" is set to "False" (Windows only).</p>
+            <p><b>"-r [path]" or "--restore [path]" option:</b> restores the files from a backup json file found at the specified path.</p>
+            <p><b>"-p" or "--prep" flag:</b> runs the server executable without starting the server.</p>
+            <p><b>"--version" flag:</b> shows the server's version.</p>
         <h2>Issues</h2>
             <p>If you encounter a bug or error when using SC4MP Server, create a ticket on <a href="https://github.com/sc4multiplayer/sc4mp-server/releases">GitHub</a>.</p>
         <h2>Updates</h2>

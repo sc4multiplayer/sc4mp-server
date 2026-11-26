@@ -38,8 +38,20 @@ Communication uses **request-response** semantics — every client request expec
 | Protocol Identifier | 5 bytes | Always `"SC4MP"` |
 | Message Type | 3 bytes | `"Req"` for requests, `"Res"` for responses |
 | Command Code | 6 bytes | ASCII command name, null-padded |
-| Header Length | 2 bytes | Unsigned short (`H`), specifies length of JSON payload |
+| Header Length | 2 bytes | Unsigned short (`H`, little-endian), specifies length of JSON payload (0 for no headers) |
 | Headers | Variable | UTF-8 JSON-encoded key-value pairs |
+
+Every response also carries the server's info headers (the same ones as the `Info` response). When a request fails, the response has an `error` header with the reason instead, eg. `{"error": "Incorrect password."}`.
+
+Some commands send more data after the response, either as a **length-prefixed JSON** value (a 4-byte unsigned int, little-endian, giving the length of the UTF-8 JSON that follows) or as raw bytes. File tables are lists of `["<md5>", <filesize>, "<relative_path>"]` entries.
+
+### Authentication
+
+`Save`, `Token`, `Subscr` and `Chat` (and, on private servers, `PlgTbl`, `PlgDat`, `RgnTbl` and `RgnDat`) need these request headers:
+```json
+{"version": "<client version>", "user_id": "<uuid>", "password": "<password>"}
+```
+`password` is only checked when the server has one. Clients older than the server's major and minor version are refused.
 
 
 ---
@@ -47,7 +59,7 @@ Communication uses **request-response** semantics — every client request expec
 ## Commands
 
 ### COMMAND_ADD_SERVER (`AddSrv`)
-Adds the requesting server to another server’s list.
+Adds the requesting server to another server’s list. If `host` is empty, the address the request came from is used. Fails if the server isn't discoverable.
 
 **Request:**
 ```json
@@ -94,7 +106,13 @@ Retrieves general server information.
   "server_version": "<string>",
   "private": <bool>,
   "password_enabled": <bool>,
-  "user_plugins_enabled": <bool>
+  "user_plugins_enabled": <bool>,
+  "claim_duration": <int or null>,
+  "max_region_claims": <int or null>,
+  "godmode_filter": <bool>,
+  "chat_enabled": <bool>,
+  "guest_chat": <bool>,
+  "time": "YYYY-MM-DD HH:MM:SS"
 }
 ```
 
@@ -125,6 +143,10 @@ Retrieves a list of available plugin files.
 
 **Response:**
 ```json
+{}
+```
+Followed by the file table as length-prefixed JSON:
+```json
 [
   ["<md5>", <filesize>, "<relative_path>"],
   ...
@@ -136,16 +158,10 @@ Retrieves a list of available plugin files.
 ### COMMAND_PLUGINS_DATA (`PlgDat`)
 Requests actual plugin data after receiving a plugin table.
 
-**Request:**
-```json
-[
-  ["<md5>", <filesize>, "<relative_path>"],
-  ...
-]
-```
-
-**Response:**
-Raw file data stream matching the table entries.
+**Sequence:**
+1. Request, and the server responds with `{}`.
+2. The client sends the entries it wants, from the file table, as length-prefixed JSON.
+3. The server sends the files' raw data, one after another, in the same order. It closes the connection instead if an entry isn't in its file table.
 
 ---
 
@@ -164,6 +180,10 @@ Retrieves a list of available region files.
 
 **Response:**
 ```json
+{}
+```
+Followed by the file table as length-prefixed JSON:
+```json
 [
   ["<md5>", <filesize>, "<relative_path>"],
   ...
@@ -175,16 +195,10 @@ Retrieves a list of available region files.
 ### COMMAND_REGIONS_DATA (`RgnDat`)
 Requests actual region data after receiving a region table.
 
-**Request:**
-```json
-[
-  ["<md5>", <filesize>, "<relative_path>"],
-  ...
-]
-```
-
-**Response:**
-Raw file data stream matching the table entries.
+**Sequence:**
+1. Request, and the server responds with `{}`.
+2. The client sends the entries it wants, from the file table, as length-prefixed JSON.
+3. The server sends the files' raw data, one after another, in the same order. It closes the connection instead if an entry isn't in its file table.
 
 ---
 
@@ -192,10 +206,10 @@ Raw file data stream matching the table entries.
 Pushes a region save to the server.
 
 **Sequence:**
-1. Request with version and user authentication headers.
-2. Send file table JSON array.
-3. Send raw file data.
-4. Server responds with:
+1. Request with the authentication headers, and the server responds with `{}`.
+2. The client sends the region name and the size of each savegame as length-prefixed JSON: `["<region>", [<filesize>, ...]]`.
+3. The client sends the savegames' raw data, one after another.
+4. The server responds again with the result, which is `"ok"` if the save was accepted, or else the reason it wasn't (eg. `"City already claimed."`):
 ```json
 {"result": "ok"}
 ```
@@ -203,9 +217,13 @@ Pushes a region save to the server.
 ---
 
 ### COMMAND_SERVER_LIST (`SrvLst`)
-Retrieves the global SC4MP server list.
+Retrieves the global SC4MP server list. Fails if the server isn't discoverable.
 
 **Response:**
+```json
+{}
+```
+Followed by the server list as length-prefixed JSON:
 ```json
 [
   ["<host1>", <port1>],
@@ -226,7 +244,7 @@ Validates user identity by checking a hashed token.
 
 **Response:**
 ```json
-{"user_id": "<uuid>"}
+{"status": "success", "user_id": "<uuid>"}  // or {"status": "failure"}
 ```
 
 ---
