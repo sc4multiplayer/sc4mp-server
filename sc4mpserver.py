@@ -3124,6 +3124,9 @@ class RequestHandler(BaseRequestHandler):
 
 				# Wait for the output
 				while save_id not in sc4mp_regions_manager.outputs:
+					if not sc4mp_regions_manager.is_alive():	# it stops with the server, so a save still waiting won't be processed
+						self.respond(result="The server is shutting down. Try again once it's back up.")
+						return
 					time.sleep(SC4MP_DELAY)
 
 				# Send the output to the client
