@@ -2773,6 +2773,10 @@ class RequestHandler(BaseRequestHandler):
 
 				show_error(e)
 
+			finally:
+
+				self.c.close()	# also when the request failed, so the launcher isn't left waiting for its timeout
+
 			sc4mp_request_threads -= 1
 
 		except Exception as e:
