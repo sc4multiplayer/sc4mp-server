@@ -3685,7 +3685,8 @@ class ServerList(th.Thread):
 		with self.create_socket(server) as s:
 			server_list = s.server_list()
 			for host, port in server_list:
-				self.server_queue.enqueue((host, port))
+				if isinstance(host, str) and isinstance(port, int) and len(self.server_queue) < self.SERVER_LIMIT:	# the list comes from another server
+					self.server_queue.enqueue((host, port))
 
 
 class SystemTrayIconManager(th.Thread):
