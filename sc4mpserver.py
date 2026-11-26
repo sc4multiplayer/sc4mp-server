@@ -417,6 +417,16 @@ def get_stop_request_path():
 	return os.path.join(sc4mp_server_path, "stop.json")
 
 
+def save_databases():
+	"""Saves the users and clients databases now, since `os._exit` ends the process without waiting for the database threads to save them."""
+
+	for database in (sc4mp_users_database_manager, sc4mp_clients_database_manager):
+		try:
+			database.update_json()
+		except Exception as e:
+			show_error(f"An error occurred while saving the database.\n\n{e}", no_ui=True)
+
+
 def process_is_running(pid, creation):
 	"""Whether the process with this ID and creation time (as in `process.json`) is still running (Windows-only)."""
 
@@ -1912,6 +1922,8 @@ class StopRequestsManager(th.Thread):
 		while sc4mp_request_threads > 0 and time.time() < deadline:
 			time.sleep(SC4MP_DELAY)
 
+		save_databases()
+
 		# Stop the system tray icon, so it doesn't stay in the tray after the process exits
 		if sc4mp_system_tray_icon_manager:
 			sc4mp_system_tray_icon_manager.icon.stop()
@@ -2182,6 +2194,8 @@ class UpdatesManager(th.Thread):
 		deadline = time.time() + 60
 		while sc4mp_request_threads > 0 and time.time() < deadline:
 			time.sleep(SC4MP_DELAY)
+
+		save_databases()
 
 		# Stop the system tray icon, so it doesn't stay in the tray after the process exits
 		if sc4mp_system_tray_icon_manager:
