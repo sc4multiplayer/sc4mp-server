@@ -266,3 +266,46 @@ Retrieves the loading background image data.
 Followed by a binary payload of `<size>` bytes.
 
 ---
+
+### COMMAND_SUBSCRIBE (`Subscr`)
+Subscribes to the server's events (chat messages, players joining and leaving, and new cities) and keeps the connection open to stream them. Requires the user authentication headers. When the server has a password, players without it can still subscribe as guests if the server allows guest chat.
+
+**Request:**
+```json
+{"version": "<client version>", "user_id": "<uuid>", "password": "<password>"}
+```
+
+**Response:**
+```json
+{"status": "success"}
+```
+Followed by a stream of responses on the same connection, each with a list of events (an empty list every few seconds while nothing happens):
+```json
+{"events": [{"event": "<event type>", ...}, ...]}
+```
+The first events are the recent chat history, each marked `"history": true`, followed by a `welcome` event. The events are:
+```json
+{"event": "chat", "user_id": "<uuid>", "name": "<mayor name>", "message": "<text>", "time": <seconds since the epoch>, "city": "<city name>", "region": "<region>"}
+{"event": "city_founded", "user_id": "<uuid>", "name": "<mayor name>", "city": "<city name>", "region": "<region>", "coords": [<x>, <y>], "reclaimed": <bool>, "time": <seconds since the epoch>}
+{"event": "user_join", "user_id": "<uuid>", "name": "<mayor name>"}
+{"event": "user_leave", "user_id": "<uuid>", "name": "<mayor name>"}
+{"event": "welcome", "server_name": "<string>", "motd": "<string>"}
+```
+`city` and `region` on `chat` events are only sent for players who have saved a city, and `motd` only when the server has a message of the day. `reclaimed` is `true` when a player took over another mayor's city.
+
+---
+
+### COMMAND_CHAT (`Chat`)
+Sends a chat message to every subscribed player. Requires the user authentication headers (guests may chat if the server allows it). Messages can be up to 500 characters long, and a player can send up to 5 messages every 5 seconds.
+
+**Request:**
+```json
+{"version": "<client version>", "user_id": "<uuid>", "password": "<password>", "message": "<text>"}
+```
+
+**Response:**
+```json
+{"status": "success"}  // or {"error": "<reason>"}, eg. "You're sending messages too quickly. Wait a few seconds."
+```
+
+---

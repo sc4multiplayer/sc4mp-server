@@ -8,6 +8,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import socket
 import string
 import struct
@@ -131,6 +132,9 @@ SC4MP_CONFIG_DEFAULTS = [
 		("backup_server_on_startup", True),
 		("max_server_backup_days", 30),
 		("max_savegame_backups", 20),
+	]),
+	("UPDATES", [
+		("auto_update", True),
 	])
 ]
 
@@ -232,11 +236,17 @@ def main():
 		global sc4mp_server
 		sc4mp_server = Server()
 		if not sc4mp_nostart:
+			signal.signal(signal.SIGTERM, stop_on_signal)	# eg. `docker stop`, so the server shuts down the same way as on Ctrl+C
 			sc4mp_server.run()
 
 	except Exception as e:
 
 		fatal_error(e)
+
+
+def stop_on_signal(signum, frame):
+
+	raise SystemExit()
 
 
 def parse_args() -> Namespace:
@@ -1358,7 +1368,7 @@ class Server(th.Thread):
 		# `-k` and `-u` are for the check at startup only (servers are restarted with `-k` after an update, so they still update later)
 		force_update = sc4mp_force_update and not periodic
 
-		if periodic or not sc4mp_skip_update:
+		if force_update or (sc4mp_config["UPDATES"]["auto_update"] and (periodic or not sc4mp_skip_update)):
 
 			print("Checking for updates...")
 
@@ -2207,6 +2217,12 @@ class DatabaseManager(th.Thread, Database):
 					self.update_json()
 				except Exception as e:
 					show_error(e)
+
+			# Requests still being handled when the server stops can change the database (eg. a new token), so save once they finish
+			deadline = time.time() + 60
+			while sc4mp_request_threads > 0 and time.time() < deadline:
+				time.sleep(SC4MP_DELAY)
+			self.update_json()
 
 		except Exception as e:
 
