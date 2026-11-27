@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import inspect
+import ipaddress
 import json
 import os
 import random
@@ -785,6 +786,22 @@ def get_file_table(rootpath):
 			time.sleep(SC4MP_DELAY * 10)
 	
 	return filetable
+
+
+def resolve_host(host):
+	"""The IPv4 addresses of a hostname (or of an IP address), or an empty list if it doesn't resolve."""
+
+	try:
+		return socket.gethostbyname_ex(host)[2]
+	except (OSError, UnicodeError, ValueError, TypeError):
+		return []
+
+
+def is_public_host(host):
+	"""Whether a host resolves only to public addresses, eg. not to one on the server's own network."""
+
+	addresses = resolve_host(host)
+	return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
 
 
 def discard_bytes(c, size):
@@ -3615,6 +3632,12 @@ class ServerList(th.Thread):
 						server_id = random.choice(list(self.servers.keys()))
 						server_entry = self.servers.pop(server_id)
 						server = (server_entry["host"], server_entry["port"])
+
+					# Skip servers that aren't on a public address (eg. loopback or LAN), so the server list can't be made to connect to hosts on this server's network, and launchers aren't given addresses they can't reach
+					if server not in SC4MP_SERVERS and not is_public_host(server[0]):
+						print(f"[WARNING] Skipping {server[0]}:{server[1]}, which is not a public address.")
+						continue
+
 					print("Synchronizing server list with " + server[0] + ":" + str(server[1]) + "...")
 
 					# Ping the next server
