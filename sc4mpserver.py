@@ -41,7 +41,8 @@ from core.database import Database
 from core.dbpf import SC4Savegame
 from core.events import EventChannel
 from core.networking import ClientSocket, ServerSocket, BaseRequestHandler, \
-	NetworkException, ConnectionClosedException, COMMAND_SUBSCRIBE, COMMAND_CHAT
+	NetworkException, ConnectionClosedException, COMMAND_SUBSCRIBE, COMMAND_CHAT, \
+	COMMAND_CHECK_PASSWORD, COMMAND_TOKEN
 from core.util import *
 
 # Globals
@@ -160,6 +161,8 @@ sc4mp_request_threads = 0
 
 sc4mp_system_tray_icon_manager = None
 sc4mp_last_save = None
+sc4mp_password_failures = {}	# the hashes of the different incorrect passwords and the time of the last one, by IP, to limit password guessing
+sc4mp_password_failures_lock = th.RLock()
 
 
 # Functions
@@ -2810,7 +2813,7 @@ class RequestHandler(BaseRequestHandler):
 
 		if sc4mp_config["SECURITY"]["password_enabled"]:
 			password = self.headers.get('password')
-			if password != sc4mp_config["SECURITY"]["password"]:
+			if not self.check_password(password):
 				if self.command in [COMMAND_SUBSCRIBE, COMMAND_CHAT] and guest_chat_enabled():
 					self.user_id = self.authenticate_guest(self.c, self.headers.get('user_id'))
 					return
@@ -2818,6 +2821,56 @@ class RequestHandler(BaseRequestHandler):
 
 		self.user_id = \
 			self.authenticate_user(self.c, self.get_header('user_id', str))
+
+
+	def check_password(self, password):
+		"""Returns whether the password is correct. Incorrect passwords are counted for every request, but only logging in (`ChkPwd` and `Token`) and requests from unknown users are limited, so players behind the same IP as someone guessing can keep saving and chatting. Guests send no password, so they aren't either."""
+
+		# A known user has logged in with `Token` before, which a guesser can't do without the password
+		user_id = self.headers.get('user_id')
+		known_user = False
+		if self.command not in [COMMAND_CHECK_PASSWORD, COMMAND_TOKEN] and isinstance(user_id, str):
+			known_user = "token" in (sc4mp_users_database_manager.get(hashlib.sha256(user_id.encode()).hexdigest()[:32]) or {})
+
+		with sc4mp_password_failures_lock:	# so requests at the same time can't all be checked before their failures are recorded
+			limited = password and not known_user and self.password_checks_limited()
+			if not limited:
+				correct = password == sc4mp_config["SECURITY"]["password"]
+				if password and not correct:
+					self.password_failed(password)
+
+		if limited:
+			self.error("Too many incorrect passwords. Try again later.")
+
+		return correct
+
+
+	def password_checks_limited(self):
+		"""Returns whether passwords from this IP can't be checked yet because of too many different incorrect passwords: after 5, each new one has to wait twice as long as the one before (up to an hour)."""
+
+		ip = self.c.getpeername()[0]
+		with sc4mp_password_failures_lock:
+			hashes, last = sc4mp_password_failures.get(ip, (set(), 0))
+			if time.time() > last + 86400:
+				sc4mp_password_failures.pop(ip, None)	# forgotten after a day without incorrect passwords
+				hashes = set()
+			count = len(hashes)
+		return count >= 5 and time.time() < last + min(2 ** (count - 5), 3600)
+
+
+	def password_failed(self, password):
+		"""Records an incorrect password. Only different passwords count, since launchers send their saved password with every request, which is wrong after the password changes."""
+
+		ip = self.c.getpeername()[0]
+		password_hash = hashlib.sha256(str(password).encode()).hexdigest()
+		with sc4mp_password_failures_lock:
+			for failure_ip in [failure_ip for failure_ip, (failure_hashes, failure_last) in sc4mp_password_failures.items() if time.time() > failure_last + 86400]:
+				del sc4mp_password_failures[failure_ip]	# forgotten after a day without incorrect passwords
+			hashes, last = sc4mp_password_failures.get(ip, (set(), 0))
+			if password_hash not in hashes:
+				if len(hashes) < 100:	# enough for the longest wait
+					hashes.add(password_hash)
+				sc4mp_password_failures[ip] = (hashes, time.time())
 
 
 	def authenticate_guest(self, c, user_id):
@@ -3223,9 +3276,14 @@ class RequestHandler(BaseRequestHandler):
 
 	def res_check_password(self):
 
+		# Refuse banned IPs, and IPs of banned mayors
+		client_entry = sc4mp_clients_database_manager.get(self.c.getpeername()[0]) or {}
+		if client_entry.get("ban") or any((sc4mp_users_database_manager.get(ip_user_id) or {}).get("ban") for ip_user_id in client_entry.get("users", [])):
+			self.error("You are banned from this server.")
+
 		password = self.get_header('password', str)
 
-		if password == sc4mp_config["SECURITY"]["password"]:
+		if self.check_password(password):
 			status = 'success'
 		else:
 			status = 'failure'
