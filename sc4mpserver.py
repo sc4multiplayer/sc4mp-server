@@ -1200,13 +1200,11 @@ class Server(th.Thread):
 		# Get clients database
 		clients_data = sc4mp_clients_database_manager
 		
-		# Get data entry that matches ip
-		client_entry = None
-		try:
-			client_entry = clients_data[ip]
-		except Exception:
-			client_entry = {}
-			clients_data[ip] = client_entry
+		# Get data entry that matches ip. New addresses are only added once they make a request as a user (see
+		# `authenticate_user`), so connections that only ping the server or never send a request don't fill up the database.
+		client_entry = clients_data.get(ip)
+		if client_entry is None:
+			return
 
 		# Set values
 		client_entry.setdefault("users", [])
@@ -1693,6 +1691,12 @@ class Server(th.Thread):
 		# Clients database manager
 		global sc4mp_clients_database_manager
 		sc4mp_clients_database_manager = DatabaseManager(os.path.join(sc4mp_server_path, "_Database", "clients.json"))
+
+		# Remove addresses without users or a ban, since nothing uses them, and older servers added every address that connected
+		for ip, client_entry in sc4mp_clients_database_manager.items():
+			if not client_entry.get("users") and not client_entry.get("ban"):
+				sc4mp_clients_database_manager.pop(ip)
+
 		sc4mp_clients_database_manager.start()
 
 
@@ -2229,10 +2233,16 @@ class DatabaseManager(th.Thread, Database):
 				time.sleep(SC4MP_DELAY)
 
 			set_thread_name("DbThread")
+
+			# Checking a large database for changes takes a while, so save at most once a second (the server still saves right away when it stops)
+			last_save = time.time()
 			
 			while sc4mp_server_running: 
 				try:
 					time.sleep(SC4MP_DELAY)
+					if time.time() - last_save < 1:
+						continue
+					last_save = time.time()
 					self.update_json()
 				except Exception as e:
 					show_error(e)
@@ -2855,8 +2865,14 @@ class RequestHandler(BaseRequestHandler):
 		# Get clients database
 		clients_data = sc4mp_clients_database_manager
 		
-		# Get data entry that matches ip
-		client_entry = clients_data[user_ip]
+		# Get data entry that matches ip or get & set to {}
+		client_entry = clients_data.setdefault(user_ip, {})
+
+		# Set default values if missing
+		client_entry.setdefault("users", [])
+		client_entry.setdefault("ban", False)
+		client_entry.setdefault("first_contact", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+		client_entry.setdefault("last_contact", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 		# Check if the client has exceeded the user limit
 		if user_id not in client_entry["users"]:
