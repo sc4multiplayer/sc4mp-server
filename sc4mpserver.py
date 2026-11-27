@@ -1125,9 +1125,17 @@ class Server(th.Thread):
 			client_requests = {}
 			client_requests_cleared = datetime.now()
 
+			# Connections blocked from each address since `client_requests` was cleared. Only the first is logged, and the rest are summarised, so an address over its limit can't flood the log
+			client_blocked = {}
+
 			while sc4mp_server_running:
 
 				if datetime.now() >= client_requests_cleared + timedelta(seconds=60):
+
+					for host, blocked in client_blocked.items():
+						if blocked > 1:
+							print(f"[WARNING] {blocked - 1} more connections blocked from {host} in the last minute.")
+					client_blocked = {}
 
 					client_requests = {}
 					client_requests_cleared = datetime.now()
@@ -1144,7 +1152,9 @@ class Server(th.Thread):
 						c.settimeout(sc4mp_config["PERFORMANCE"]["connection_timeout"])
 
 						if (sc4mp_config["PERFORMANCE"]["request_limit"] is not None and host in client_requests and client_requests[host] >= sc4mp_config["PERFORMANCE"]["request_limit"]):
-							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + ".")
+							if host not in client_blocked:
+								print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + ".")
+							client_blocked[host] = client_blocked.get(host, 0) + 1
 							c.close()
 							continue
 						else:
