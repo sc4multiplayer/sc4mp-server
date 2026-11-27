@@ -41,7 +41,8 @@ from core.database import Database
 from core.dbpf import SC4Savegame
 from core.events import EventChannel
 from core.networking import ClientSocket, ServerSocket, BaseRequestHandler, \
-	NetworkException, ConnectionClosedException, COMMAND_SUBSCRIBE, COMMAND_CHAT
+	NetworkException, ConnectionClosedException, COMMAND_SUBSCRIBE, COMMAND_CHAT, \
+	COMMAND_CHECK_PASSWORD, COMMAND_TOKEN
 from core.util import *
 
 # Globals
@@ -161,7 +162,7 @@ sc4mp_request_threads = 0
 sc4mp_system_tray_icon_manager = None
 sc4mp_last_save = None
 sc4mp_password_failures = {}	# the hashes of the different incorrect passwords and the time of the last one, by IP, to limit password guessing
-sc4mp_password_failures_lock = th.Lock()
+sc4mp_password_failures_lock = th.RLock()
 
 
 # Functions
@@ -2812,11 +2813,7 @@ class RequestHandler(BaseRequestHandler):
 
 		if sc4mp_config["SECURITY"]["password_enabled"]:
 			password = self.headers.get('password')
-			if password:	# guests send no password
-				self.limit_password_checks()
-			if password != sc4mp_config["SECURITY"]["password"]:
-				if password:
-					self.password_failed(password)
+			if not self.check_password(password):
 				if self.command in [COMMAND_SUBSCRIBE, COMMAND_CHAT] and guest_chat_enabled():
 					self.user_id = self.authenticate_guest(self.c, self.headers.get('user_id'))
 					return
@@ -2826,11 +2823,30 @@ class RequestHandler(BaseRequestHandler):
 			self.authenticate_user(self.c, self.get_header('user_id', str))
 
 
+	def check_password(self, password):
+		"""Returns whether the password is correct. Only logging in (`ChkPwd` and `Token`) is limited and counted, so players behind the same IP as someone guessing can keep saving and chatting. Guests send no password, so they aren't either."""
+
+		log_in = password and self.command in [COMMAND_CHECK_PASSWORD, COMMAND_TOKEN]
+
+		with sc4mp_password_failures_lock:	# so requests at the same time can't all be checked before their failures are recorded
+			if log_in:
+				self.limit_password_checks()
+			correct = password == sc4mp_config["SECURITY"]["password"]
+			if log_in and not correct:
+				self.password_failed(password)
+
+		return correct
+
+
 	def limit_password_checks(self):
 		"""Refuses to check passwords from an IP with too many different incorrect passwords: after 5, each new one has to wait twice as long as the one before (up to an hour)."""
 
+		ip = self.c.getpeername()[0]
 		with sc4mp_password_failures_lock:
-			hashes, last = sc4mp_password_failures.get(self.c.getpeername()[0], (set(), 0))
+			hashes, last = sc4mp_password_failures.get(ip, (set(), 0))
+			if time.time() > last + 86400:
+				sc4mp_password_failures.pop(ip, None)	# forgotten after a day without incorrect passwords
+				hashes = set()
 			count = len(hashes)
 		if count >= 5 and time.time() < last + min(2 ** (count - 5), 3600):
 			self.error("Too many incorrect passwords. Try again later.")
@@ -2842,9 +2858,9 @@ class RequestHandler(BaseRequestHandler):
 		ip = self.c.getpeername()[0]
 		password_hash = hashlib.sha256(str(password).encode()).hexdigest()
 		with sc4mp_password_failures_lock:
+			for failure_ip in [failure_ip for failure_ip, (failure_hashes, failure_last) in sc4mp_password_failures.items() if time.time() > failure_last + 86400]:
+				del sc4mp_password_failures[failure_ip]	# forgotten after a day without incorrect passwords
 			hashes, last = sc4mp_password_failures.get(ip, (set(), 0))
-			if time.time() > last + 86400:
-				hashes = set()	# forgotten after a day without incorrect passwords
 			if password_hash not in hashes:
 				if len(hashes) < 100:	# enough for the longest wait
 					hashes.add(password_hash)
@@ -3259,15 +3275,12 @@ class RequestHandler(BaseRequestHandler):
 		if client_entry.get("ban") or any((sc4mp_users_database_manager.get(ip_user_id) or {}).get("ban") for ip_user_id in client_entry.get("users", [])):
 			self.error("You are banned from this server.")
 
-		self.limit_password_checks()
-
 		password = self.get_header('password', str)
 
-		if password == sc4mp_config["SECURITY"]["password"]:
+		if self.check_password(password):
 			status = 'success'
 		else:
 			status = 'failure'
-			self.password_failed(password)
 
 		self.respond(status=status)
 
