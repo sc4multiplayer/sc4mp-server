@@ -752,10 +752,17 @@ def send_filestream(c, rootpath):
 
 	file_table = get_file_table(rootpath)
 
-	# Receive the filetable from the client and verify it
-	ft = [tuple(item) for item in c.recv_json()]
+	# Refuse file tables larger than the server's own one as JSON (the launcher sends back entries from it) before reading them, so they can't fill the memory
+	data_size = struct.unpack("I", c.recv_exact(struct.calcsize("I")))[0]
+	if data_size > len(json.dumps(file_table)):
+		c.close()
+		return
+
+	# Receive the filetable from the client and verify it. Repeated entries are sent once
+	ft = list(dict.fromkeys(tuple(item) for item in json.loads(c.recv_exact(data_size).decode())))
+	entries = set(file_table)
 	for item in ft:
-		if not item in file_table:
+		if not item in entries:
 			c.close()
 			return
 	filetable = ft
