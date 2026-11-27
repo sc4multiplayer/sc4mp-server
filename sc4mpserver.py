@@ -77,9 +77,9 @@ SC4MP_BUFFER_SIZE = 4096
 
 SC4MP_DELAY = .1
 SC4MP_FILESTREAM_TIMEOUT = 60	# seconds a launcher sending or receiving files can pause for (eg. while it writes a file), however low `connection_timeout` is
+SC4MP_USER_ID_LENGTHS = (8, 128)	# shortest and longest user IDs accepted (launchers make them 32 characters long)
 
 SC4MP_CHAT_MAX_LENGTH = 500
-SC4MP_USER_ID_LENGTHS = (8, 128)	# shortest and longest user IDs accepted (launchers make them 32 characters long)
 SC4MP_CHAT_NAME_MAX_LENGTH = 50	# characters of a mayor name shown in chat
 SC4MP_CHAT_RATE = (5, 5)	# players can send this many chat messages in this many seconds
 SC4MP_STOP_TIMEOUT = 30	# seconds to wait for a running server to stop before ending it by force
@@ -2822,10 +2822,14 @@ class RequestHandler(BaseRequestHandler):
 		user_id = self.headers.get('user_id')
 		if not isinstance(user_id, str) or not SC4MP_USER_ID_LENGTHS[0] <= len(user_id) <= SC4MP_USER_ID_LENGTHS[1]:
 			if self.command in [COMMAND_PLUGINS_DATA, COMMAND_PLUGINS_TABLE, COMMAND_REGIONS_DATA, COMMAND_REGIONS_TABLE]:
-				if (sc4mp_clients_database_manager.get(self.c.getpeername()[0]) or {}).get("ban"):
+				client_entry = sc4mp_clients_database_manager.get(self.c.getpeername()[0]) or {}
+				if client_entry.get("ban"):
 					self.error("You are banned from this server.")
+				for ip_user_id in client_entry.get("users", []):
+					if (sc4mp_users_database_manager.get(ip_user_id) or {}).get("ban"):
+						self.error("You are banned from this server.")
 				return
-			self.error("Invalid user ID.")
+			self.error("Invalid user ID. In the launcher, turn off \"Hide authentication warnings\" (Launcher > Settings > General...) and connect again.")	# released launchers send none with that setting on when their saved token doesn't work any more (eg. after a rollback)
 
 		self.user_id = \
 			self.authenticate_user(self.c, self.get_header('user_id', str))
