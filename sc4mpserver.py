@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import hmac
 import inspect
 import json
 import os
@@ -2810,7 +2811,7 @@ class RequestHandler(BaseRequestHandler):
 
 		if sc4mp_config["SECURITY"]["password_enabled"]:
 			password = self.headers.get('password')
-			if password != sc4mp_config["SECURITY"]["password"]:
+			if not isinstance(password, str) or not hmac.compare_digest(password.encode(), sc4mp_config["SECURITY"]["password"].encode()):
 				if self.command in [COMMAND_SUBSCRIBE, COMMAND_CHAT] and guest_chat_enabled():
 					self.user_id = self.authenticate_guest(self.c, self.headers.get('user_id'))
 					return
