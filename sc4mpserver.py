@@ -304,7 +304,8 @@ def prevent_multiple():
 					except Exception:
 						o_p_c = None
 
-					if other_process_creation == o_p_c:
+					# Only entries with a numeric PID and a creation time, since the PID is passed to `TASKKILL`
+					if isinstance(other_process_pid, int) and other_process_creation is not None and other_process_creation == o_p_c:
 
 						# Ask it to stop, so it finishes the requests it's handling and removes its tray icon (see `StopRequestsManager`)
 						update_json(get_stop_request_path(), {"pid": other_process_pid})
@@ -384,7 +385,8 @@ def get_other_instances():
 				except Exception:
 					creation = None
 
-				if creation == instance["creation"]:
+				# Only entries with a numeric PID and a creation time, since the PID is written into `updater.bat`
+				if isinstance(pid, int) and instance["creation"] is not None and creation == instance["creation"]:
 					instances[pid] = instance["args"]
 				else:
 					os.unlink(path)	# not running anymore
