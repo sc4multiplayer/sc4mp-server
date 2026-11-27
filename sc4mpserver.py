@@ -3443,28 +3443,90 @@ class RequestHandler(BaseRequestHandler):
 
 			mtime = os.path.getmtime(filename)
 			if sc4mp_chat_filter is None or sc4mp_chat_filter[0] != mtime:
+				# Each letter can be typed once or three or more times (eg. "fuuuck"), and split by spaces or punctuation other than apostrophes (eg. "f uck" or "f.u.c.k"). Unsplit words come first, so they're matched like before.
+				separator = r"(?:[^\w'’]|_)"
 				words = []
+				split_words = []
 				with open(filename, encoding="utf-8") as file:
 					for line in file:
 						word = line.strip()
 						if not word or word.startswith("#"):
 							continue
-						if word.endswith("*"):
-							words.append(re.escape(word[:-1].strip()) + r"\w*")
+						prefix = word.endswith("*")
+						if prefix:
+							word = word[:-1].strip()
+						letters = [re.escape(letter) + "(?:" + re.escape(letter) + "{2,})?" for letter in word]
+						if prefix:
+							words.append("".join(letters) + r"\w*")
+							# A split word can only go on spelled out (eg. "f u c k i n g"), since "f ucking" would also match "who really"
+							split_words.append((separator + "*").join(letters) + r"(?:(?<![^\W_]{2})" + separator + r"+[^\W_](?![^\W_]))*")
 						else:
-							words.append(re.escape(word))
+							words.append("".join(letters))
+							split_words.append((separator + "*").join(letters))
 				words.sort(key=len, reverse=True)
-				pattern = re.compile(r"(?<!\w)(?:" + "|".join(words) + r")(?!\w)", re.IGNORECASE) if words else None
+				split_words.sort(key=len, reverse=True)
+				pattern = re.compile(r"(?<!\w)(?:" + "|".join(words + split_words) + r")(?!\w)", re.IGNORECASE) if words else None
 				sc4mp_chat_filter = (mtime, pattern)
 
 			pattern = sc4mp_chat_filter[1]
 			if pattern is None:
 				return text
-			return pattern.sub(lambda match: "*" * len(match.group(0)), text)
+
+			# Matches that turn out to be other words are skipped, and the search goes on from their next character, eg. "fucker" in "mother fucker"
+			filtered = ""
+			position = 0
+			match = pattern.search(text)
+			while match:
+				if RequestHandler.is_chat_filter_match(match):
+					filtered += text[position:match.start()] + "*" * len(match.group(0))
+					position = match.end()
+					match = pattern.search(text, position)
+				else:
+					match = pattern.search(text, match.start() + 1)
+			return filtered + text[position:]
 
 		except Exception as e:
 			show_error(f"An error occurred while filtering a chat message.\n\n{e}")
 			return text
+
+
+	@staticmethod
+	def is_chat_filter_match(match):
+		"""Returns `False` if a match of the chat filter is split into letters or pieces that belong to other words (eg. "let's hit", "As S" or "c l a s s"), otherwise `True`."""
+
+		text = match.group(0)
+		separator = r"(?:[^\w'’]|_)"
+
+		if not re.search(separator, text):
+			return True
+
+		before = match.string[:match.start()]
+		after = match.string[match.end():]
+		pieces = re.findall(r"[^\W_]+", text)
+		letters = "".join(pieces)
+
+		# Pieces joined to other words by punctuation, eg. "let's hit", "U.S. hit" or "who re-zoned"
+		if re.search(r"[^\W_](?:[^\w\s]|_)$", before) or re.match(r"(?:[^\w\s]|_)[^\W_]", after):
+			return False
+
+		# Spelled-out letters, eg. "f u c k"
+		if all(len(piece) == 1 for piece in pieces):
+
+			# Letters of a longer spelled-out word, eg. "c l a s s" or "a s s e t s"
+			if re.search(r"(?<![^\W_])[^\W_]" + separator + r"+$", before) or re.match(separator + r"+[^\W_](?![^\W_])", after):
+				return False
+
+			# Letters split by different separators, eg. "a s.s."
+			if len(set(re.findall(separator + "+", text))) > 1:
+				return False
+
+			return True
+
+		# Pieces in different cases, eg. "As S" or "a SS"
+		if letters not in (letters.lower(), letters.upper(), letters.capitalize()):
+			return False
+
+		return True
 
 
 	def get_chat_name(self, user_id):
