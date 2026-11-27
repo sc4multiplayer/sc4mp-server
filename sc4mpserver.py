@@ -1616,10 +1616,19 @@ class Server(th.Thread):
 				if (os.path.isfile(path) and path[-4:] == ".sc4"):
 					savegame_paths.append(path)
 
-			# Open savegames as DBPF objects
+			# Open savegames as DBPF objects (skipping savegames that can't be read, so they don't stop the server from starting)
 			savegames: list[SC4Savegame] = []
 			for savegame_path in savegame_paths:
-				savegames.append(SC4Savegame(savegame_path, error_callback=show_error))
+				savegame = None
+				try:
+					savegame = SC4Savegame(savegame_path, error_callback=show_error)
+					savegame.get_SC4ReadRegionalCity()
+					set_savegame_data({}, savegame)
+					savegames.append(savegame)
+				except Exception as e:
+					print(f"[WARNING] Skipping invalid savegame at \"{savegame_path}\": {e!r}")
+					if savegame is not None:
+						savegame.close()
 
 			# Get the region subfile of each DBPF object and update the database
 			for savegame in savegames:
@@ -2360,6 +2369,17 @@ class RegionsManager(th.Thread):
 									if savegameModeFlag == 0:
 										self.outputs[save_id] = "You must establish a city before claiming a tile."
 								
+								# Filter out savegames that can't be read, before anything is written to the region
+								try:
+									set_savegame_data({}, savegame)
+								except Exception as e:
+									print(f"[WARNING] Invalid savegame: {e!r}")
+									self.outputs[save_id] = "Invalid savegame."
+
+								# Filter out cities that aren't small, medium or large (1x1, 2x2 or 4x4 tiles)
+								if savegameSizeX != savegameSizeY or savegameSizeX not in (1, 2, 4):
+									self.outputs[save_id] = "Invalid city size."
+
 								# Filter out cities of the wrong size
 								if "size" in entry:
 									if (savegameSizeX != savegameSizeY or savegameSizeX != entry["size"]):
