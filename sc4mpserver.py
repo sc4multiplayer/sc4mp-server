@@ -891,12 +891,29 @@ def restore(filename):
 			print("Restoring backup at \"" + path + "\"")
 			data = load_json(path)
 			directory, filename = os.path.split(os.path.abspath(path))
+			restore_root = os.path.join(directory, "restores", filename[:-5])
 			files_entry = data["files"]
 			for original_filename, file_entry in files_entry.items():
 				hashcode = file_entry["hashcode"]
 				size = file_entry["size"]
 				data_filename = os.path.join(directory, "data", hashcode + "_" + str(size))
-				restore_filename = os.path.join(directory, "restores", filename[:-5], original_filename)
+
+				# Older backups store absolute paths when the server path is absolute, which are restored relative to the server folder (or else to their drive)
+				if os.path.isabs(original_filename) or os.path.splitdrive(original_filename)[0]:
+					try:
+						relative_filename = os.path.relpath(original_filename, os.path.abspath(sc4mp_server_path))
+					except ValueError:
+						relative_filename = os.pardir	# on another drive
+					if relative_filename.split(os.sep)[0] == os.pardir:
+						relative_filename = os.path.splitdrive(original_filename)[1].lstrip("\\/")
+					original_filename = relative_filename
+
+				# Only restore files inside the restore folder
+				restore_filename = os.path.abspath(os.path.join(restore_root, original_filename))
+				if os.path.commonpath([restore_filename, restore_root]) != restore_root or restore_filename == restore_root:
+					print(f"[WARNING] Skipping \"{original_filename}\", since it would be restored outside of \"{restore_root}\".")
+					continue
+
 				print("Copying \"" + data_filename + "\" to \"" + restore_filename + "\"")
 				restore_directory = os.path.split(restore_filename)[0]
 				if not os.path.exists(restore_directory):
@@ -2054,7 +2071,7 @@ class BackupsManager(th.Thread):
 			fullpath_entry["hashcode"] = hashcode
 			fullpath_entry["size"] = filesize
 			#fullpath_entry["backup_filename"] = filename
-			files_entry[fullpath] = fullpath_entry
+			files_entry[os.path.relpath(fullpath, sc4mp_server_path)] = fullpath_entry	# relative to the server folder, so restores are written to the restore folder
 
 		# Create dictionary for backup and add the files entry
 		backup_data = {}
