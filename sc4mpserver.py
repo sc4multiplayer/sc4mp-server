@@ -1151,12 +1151,6 @@ class Server(th.Thread):
 
 						c.settimeout(sc4mp_config["PERFORMANCE"]["connection_timeout"])
 
-						threads = [thread for thread in client_threads.get(host, []) if thread.is_alive()]
-						if max_client_threads is not None and len(threads) >= max_client_threads:
-							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + " (too many open connections).")
-							c.close()
-							continue
-
 						if (sc4mp_config["PERFORMANCE"]["request_limit"] is not None and host in client_requests and client_requests[host] >= sc4mp_config["PERFORMANCE"]["request_limit"]):
 							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + ".")
 							c.close()
@@ -1164,6 +1158,12 @@ class Server(th.Thread):
 						else:
 							client_requests.setdefault(host, 0)
 							client_requests[host] += 1
+
+						threads = [thread for thread in client_threads.get(host, []) if thread.is_alive()]
+						if max_client_threads is not None and len(threads) >= max_client_threads:
+							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + " (too many open connections).")
+							c.close()
+							continue
 
 						# report(f"Connection accepted with {host}.")
 
