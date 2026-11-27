@@ -2439,6 +2439,10 @@ class RegionsManager(th.Thread):
 										destination = os.path.join(destination_directory, new_filename)
 										shutil.copy(filename, destination)
 
+									# Export the savegame again if it replaced one skipped at startup
+									if os.path.normpath(destination) in sc4mp_invalid_savegames:
+										sc4mp_invalid_savegames.remove(os.path.normpath(destination))
+
 									# Delete previous save file if it exists (after the new one is copied, so an error doesn't lose the city)
 									if "filename" in entry and entry["filename"] is not None:
 										previous_filename = os.path.join(sc4mp_server_path, "Regions", region, entry["filename"])
