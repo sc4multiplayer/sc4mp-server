@@ -2365,6 +2365,15 @@ class RegionsManager(th.Thread):
 									if (savegameSizeX != savegameSizeY or savegameSizeX != entry["size"]):
 										self.outputs[save_id] = "Invalid city size."
 
+								# Filter out cities that overlap other cities
+								for other_coords, other_entry in data.items():
+									if other_coords == coords or other_entry is None or other_entry.get("filename") is None or "size" not in other_entry:
+										continue
+									otherX, otherY = [int(value) for value in other_coords.split("_")]
+									if savegameX < otherX + other_entry["size"] and otherX < savegameX + savegameSizeX and savegameY < otherY + other_entry["size"] and otherY < savegameY + savegameSizeY:
+										self.outputs[save_id] = "Invalid city location."
+										break
+
 								# Filter out claims on tiles with unexpired claims of other users
 								reclaimed = False
 								if "owner" in entry:
@@ -2442,6 +2451,11 @@ class RegionsManager(th.Thread):
 									if reclaimed:
 										entry["last_mayor_name"] = entry.get("mayor_name", None)
 									set_savegame_data(entry, savegame)
+
+									# Reserve tiles which the savegame occupies
+									for offsetX in range(savegameSizeX):
+										for offsetY in range(savegameSizeY):
+											data.setdefault(f"{savegameX + offsetX}_{savegameY + offsetY}", None)
 
 									# Update database
 									self.update_json(data_filename, data)
