@@ -160,6 +160,7 @@ sc4mp_request_threads = 0
 
 sc4mp_system_tray_icon_manager = None
 sc4mp_last_save = None
+sc4mp_invalid_savegames = []	# paths of savegames skipped at startup since they can't be read, which aren't exported
 
 
 # Functions
@@ -655,24 +656,27 @@ def export(export_type):
 					update_database = False
 					for entry in data.values():
 						if entry is not None:
-							filename = entry.get("filename", None)
-							if filename is not None:
-								filename = os.path.join(target, region, filename)
-								if not os.path.exists(filename):
-									print(f"[WARNING] Savegame at \"{filename}\" is missing!")
-									reset_filename = entry.get("reset_filename", None)
-									if reset_filename is not None:
-										reset_filename = os.path.join(target, region, reset_filename)
-										if os.path.exists(reset_filename):
-											print(f"[WARNING] - replacing with \"{reset_filename}\"...")
-											shutil.copy(reset_filename, filename)
+							try:
+								filename = entry.get("filename", None)
+								if filename is not None:
+									filename = os.path.join(target, region, filename)
+									if not os.path.exists(filename):
+										print(f"[WARNING] Savegame at \"{filename}\" is missing!")
+										reset_filename = entry.get("reset_filename", None)
+										if reset_filename is not None:
+											reset_filename = os.path.join(target, region, reset_filename)
+											if os.path.exists(reset_filename):
+												print(f"[WARNING] - replacing with \"{reset_filename}\"...")
+												shutil.copy(reset_filename, filename)
+											else:
+												print(f"[WARNING] - cannot replace with \"{reset_filename}\", since the file does not exist.")
 										else:
-											print(f"[WARNING] - cannot replace with \"{reset_filename}\", since the file does not exist.")
-									else:
-										entry["filename"] = None
-									print("[WARNING] - resetting claim...")
-									entry["owner"] = None
-									update_database = True
+											entry["filename"] = None
+										print("[WARNING] - resetting claim...")
+										entry["owner"] = None
+										update_database = True
+							except Exception as e:
+								show_error(e)	# carry on with the other savegames
 					if update_database:
 						update_json(data_filename, data)
 	except Exception as e:
@@ -705,8 +709,12 @@ def export(export_type):
 				pass	# eg. a new file, or links aren't supported, so it's copied
 		return shutil.copy2(source, destination_file)
 
+	# Don't export backups, or savegames skipped at startup since they can't be read
+	def ignore(directory, names):
+		return [name for name in names if name == "_Backups" or os.path.normpath(os.path.join(directory, name)) in sc4mp_invalid_savegames]
+
 	try:
-		shutil.copytree(target, destination, ignore=shutil.ignore_patterns('_Backups'), copy_function=copy_file) #, '_Database'))	
+		shutil.copytree(target, destination, ignore=ignore, copy_function=copy_file) #, '_Database'))	
 	except Exception:
 		shutil.rmtree(destination, ignore_errors=True)	# so an export that keeps failing doesn't leave a new folder each time it's retried
 		raise
@@ -1616,10 +1624,20 @@ class Server(th.Thread):
 				if (os.path.isfile(path) and path[-4:] == ".sc4"):
 					savegame_paths.append(path)
 
-			# Open savegames as DBPF objects
+			# Open savegames as DBPF objects (skipping savegames that can't be read, so they don't stop the server from starting)
 			savegames: list[SC4Savegame] = []
 			for savegame_path in savegame_paths:
-				savegames.append(SC4Savegame(savegame_path, error_callback=show_error))
+				savegame = None
+				try:
+					savegame = SC4Savegame(savegame_path, error_callback=show_error)
+					savegame.get_SC4ReadRegionalCity()
+					set_savegame_data({}, savegame)
+					savegames.append(savegame)
+				except Exception as e:
+					print(f"[WARNING] Skipping invalid savegame at \"{savegame_path}\": {e!r}")
+					sc4mp_invalid_savegames.append(os.path.normpath(savegame_path))
+					if savegame is not None:
+						savegame.close()
 
 			# Get the region subfile of each DBPF object and update the database
 			for savegame in savegames:
@@ -2360,6 +2378,17 @@ class RegionsManager(th.Thread):
 									if savegameModeFlag == 0:
 										self.outputs[save_id] = "You must establish a city before claiming a tile."
 								
+								# Filter out savegames that can't be read, before anything is written to the region
+								try:
+									set_savegame_data({}, savegame)
+								except Exception as e:
+									print(f"[WARNING] Invalid savegame: {e!r}")
+									self.outputs[save_id] = "Invalid savegame."
+
+								# Filter out cities that aren't small, medium or large (1x1, 2x2 or 4x4 tiles)
+								if savegameSizeX != savegameSizeY or savegameSizeX not in (1, 2, 4):
+									self.outputs[save_id] = "Invalid city size."
+
 								# Filter out cities of the wrong size
 								if "size" in entry:
 									if (savegameSizeX != savegameSizeY or savegameSizeX != entry["size"]):
@@ -2396,12 +2425,6 @@ class RegionsManager(th.Thread):
 								# Proceed if save push has not been filtered out
 								if save_id not in self.outputs:
 
-									# Delete previous save file if it exists
-									if "filename" in entry and entry["filename"] is not None:
-										previous_filename = os.path.join(sc4mp_server_path, "Regions", region, entry["filename"])
-										if os.path.exists(previous_filename):
-											os.remove(previous_filename)
-
 									# Set new filename
 									new_filename = set_savegame_filename(savegameX, savegameY, savegameCityName, savegameMayorName, savegameModeFlag)
 									new_filename_oldscheme = f"{coords}.sc4"
@@ -2410,14 +2433,21 @@ class RegionsManager(th.Thread):
 									destination_directory = os.path.join(sc4mp_server_path, "Regions", region)
 									try:
 										destination = os.path.join(destination_directory, new_filename)
-										if os.path.exists(destination):
-											os.remove(destination)
 										shutil.copy(filename, destination)
 									except Exception:
-										destination = os.path.join(destination_directory, new_filename_oldscheme)
-										if os.path.exists(destination):
-											os.remove(destination)
+										new_filename = new_filename_oldscheme
+										destination = os.path.join(destination_directory, new_filename)
 										shutil.copy(filename, destination)
+
+									# Export the savegame again if it replaced one skipped at startup
+									if os.path.normpath(destination) in sc4mp_invalid_savegames:
+										sc4mp_invalid_savegames.remove(os.path.normpath(destination))
+
+									# Delete previous save file if it exists (after the new one is copied, so an error doesn't lose the city)
+									if "filename" in entry and entry["filename"] is not None:
+										previous_filename = os.path.join(sc4mp_server_path, "Regions", region, entry["filename"])
+										if os.path.exists(previous_filename) and not os.path.samefile(previous_filename, destination):
+											os.remove(previous_filename)
 
 									# Copy save file from temporary directory to backup directory
 									backup_directory = os.path.join(sc4mp_server_path, "Regions", region, "_Backups", coords)
