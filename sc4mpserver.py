@@ -160,6 +160,8 @@ sc4mp_request_threads = 0
 
 sc4mp_system_tray_icon_manager = None
 sc4mp_last_save = None
+sc4mp_password_failures = {}	# the number of incorrect passwords and the time of the last one, by IP, to limit password guessing
+sc4mp_password_failures_lock = th.Lock()
 
 
 # Functions
@@ -2810,7 +2812,11 @@ class RequestHandler(BaseRequestHandler):
 
 		if sc4mp_config["SECURITY"]["password_enabled"]:
 			password = self.headers.get('password')
+			if password:	# guests send no password
+				self.limit_password_checks()
 			if password != sc4mp_config["SECURITY"]["password"]:
+				if password:
+					self.password_failed()
 				if self.command in [COMMAND_SUBSCRIBE, COMMAND_CHAT] and guest_chat_enabled():
 					self.user_id = self.authenticate_guest(self.c, self.headers.get('user_id'))
 					return
@@ -2818,6 +2824,25 @@ class RequestHandler(BaseRequestHandler):
 
 		self.user_id = \
 			self.authenticate_user(self.c, self.get_header('user_id', str))
+
+
+	def limit_password_checks(self):
+		"""Refuses to check passwords from an IP with too many incorrect passwords: after 5, each one has to wait twice as long as the one before (up to an hour)."""
+
+		with sc4mp_password_failures_lock:
+			count, last = sc4mp_password_failures.get(self.c.getpeername()[0], (0, 0))
+		if count >= 5 and time.time() < last + min(2 ** (count - 5), 3600):
+			self.error("Too many incorrect passwords. Try again later.")
+
+
+	def password_failed(self):
+
+		ip = self.c.getpeername()[0]
+		with sc4mp_password_failures_lock:
+			count, last = sc4mp_password_failures.get(ip, (0, 0))
+			if time.time() > last + 86400:
+				count = 0	# forgotten after a day without incorrect passwords
+			sc4mp_password_failures[ip] = (count + 1, time.time())
 
 
 	def authenticate_guest(self, c, user_id):
@@ -3223,12 +3248,20 @@ class RequestHandler(BaseRequestHandler):
 
 	def res_check_password(self):
 
+		# Refuse banned IPs, and IPs of banned mayors
+		client_entry = sc4mp_clients_database_manager.get(self.c.getpeername()[0]) or {}
+		if client_entry.get("ban") or any((sc4mp_users_database_manager.get(ip_user_id) or {}).get("ban") for ip_user_id in client_entry.get("users", [])):
+			self.error("You are banned from this server.")
+
+		self.limit_password_checks()
+
 		password = self.get_header('password', str)
 
 		if password == sc4mp_config["SECURITY"]["password"]:
 			status = 'success'
 		else:
 			status = 'failure'
+			self.password_failed()
 
 		self.respond(status=status)
 
