@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import inspect
+import ipaddress
 import json
 import os
 import random
@@ -785,6 +786,22 @@ def get_file_table(rootpath):
 			time.sleep(SC4MP_DELAY * 10)
 	
 	return filetable
+
+
+def resolve_host(host):
+	"""The IPv4 addresses of a hostname (or of an IP address), or an empty list if it doesn't resolve."""
+
+	try:
+		return socket.gethostbyname_ex(host)[2]
+	except (OSError, UnicodeError, ValueError, TypeError):
+		return []
+
+
+def is_public_host(host):
+	"""Whether a host resolves only to public addresses, eg. not to one on the server's own network, for servers named by other servers."""
+
+	addresses = resolve_host(host)
+	return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
 
 
 def discard_bytes(c, size):
@@ -3190,7 +3207,11 @@ class RequestHandler(BaseRequestHandler):
 		
 		if sc4mp_config["NETWORK"]["discoverable"]:
 
-			host = self.get_header('host', str) or self.c.getpeername()[0]
+			# Only add the address the request came from, or a hostname for it, so the server list can't be made to connect to other hosts
+			address = self.c.getpeername()[0]
+			host = self.get_header('host', str)
+			if not host or address not in resolve_host(host):
+				host = address
 			port = self.get_header('port', int)
 
 			server = (host, port)
@@ -3728,7 +3749,7 @@ class ServerList(th.Thread):
 		with self.create_socket(server) as s:
 			server_list = s.server_list()
 			for host, port in server_list:
-				if isinstance(host, str) and isinstance(port, int) and len(self.server_queue) < self.SERVER_LIMIT:	# the list comes from another server
+				if isinstance(host, str) and isinstance(port, int) and len(self.server_queue) < self.SERVER_LIMIT and is_public_host(host):	# the list comes from another server
 					self.server_queue.enqueue((host, port))
 
 
