@@ -41,7 +41,8 @@ from core.database import Database
 from core.dbpf import SC4Savegame
 from core.events import EventChannel
 from core.networking import ClientSocket, ServerSocket, BaseRequestHandler, \
-	NetworkException, ConnectionClosedException, COMMAND_SUBSCRIBE, COMMAND_CHAT
+	NetworkException, ConnectionClosedException, COMMAND_SUBSCRIBE, COMMAND_CHAT, \
+	COMMAND_PLUGINS_DATA, COMMAND_PLUGINS_TABLE, COMMAND_REGIONS_DATA, COMMAND_REGIONS_TABLE
 from core.util import *
 
 # Globals
@@ -78,6 +79,7 @@ SC4MP_DELAY = .1
 SC4MP_FILESTREAM_TIMEOUT = 60	# seconds a launcher sending or receiving files can pause for (eg. while it writes a file), however low `connection_timeout` is
 
 SC4MP_CHAT_MAX_LENGTH = 500
+SC4MP_USER_ID_LENGTHS = (8, 128)	# shortest and longest user IDs accepted (launchers make them 32 characters long)
 SC4MP_CHAT_NAME_MAX_LENGTH = 50	# characters of a mayor name shown in chat
 SC4MP_CHAT_RATE = (5, 5)	# players can send this many chat messages in this many seconds
 SC4MP_STOP_TIMEOUT = 30	# seconds to wait for a running server to stop before ending it by force
@@ -2815,6 +2817,15 @@ class RequestHandler(BaseRequestHandler):
 					self.user_id = self.authenticate_guest(self.c, self.headers.get('user_id'))
 					return
 				self.error("Incorrect password.")
+
+		# Requests without a user ID can't be told apart, so they aren't recorded as a user. Launchers send none for the server list's stats of private servers, so those can still get the plugins and regions
+		user_id = self.headers.get('user_id')
+		if not isinstance(user_id, str) or not SC4MP_USER_ID_LENGTHS[0] <= len(user_id) <= SC4MP_USER_ID_LENGTHS[1]:
+			if self.command in [COMMAND_PLUGINS_DATA, COMMAND_PLUGINS_TABLE, COMMAND_REGIONS_DATA, COMMAND_REGIONS_TABLE]:
+				if (sc4mp_clients_database_manager.get(self.c.getpeername()[0]) or {}).get("ban"):
+					self.error("You are banned from this server.")
+				return
+			self.error("Invalid user ID.")
 
 		self.user_id = \
 			self.authenticate_user(self.c, self.get_header('user_id', str))
