@@ -798,7 +798,7 @@ def resolve_host(host):
 
 
 def is_public_host(host):
-	"""Whether a host resolves only to public addresses, eg. not to one on the server's own network, for servers named by other servers."""
+	"""Whether a host resolves only to public addresses, eg. not to one on the server's own network."""
 
 	addresses = resolve_host(host)
 	return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
@@ -3207,11 +3207,7 @@ class RequestHandler(BaseRequestHandler):
 		
 		if sc4mp_config["NETWORK"]["discoverable"]:
 
-			# Only add the address the request came from, or a hostname for it, so the server list can't be made to connect to other hosts
-			address = self.c.getpeername()[0]
-			host = self.get_header('host', str)
-			if not host or address not in resolve_host(host):
-				host = address
+			host = self.get_header('host', str) or self.c.getpeername()[0]
 			port = self.get_header('port', int)
 
 			server = (host, port)
@@ -3636,6 +3632,12 @@ class ServerList(th.Thread):
 						server_id = random.choice(list(self.servers.keys()))
 						server_entry = self.servers.pop(server_id)
 						server = (server_entry["host"], server_entry["port"])
+
+					# Skip servers that aren't on a public address (eg. loopback or LAN), so the server list can't be made to connect to hosts on this server's network, and launchers aren't given addresses they can't reach
+					if server not in SC4MP_SERVERS and not is_public_host(server[0]):
+						print(f"[WARNING] Skipping {server[0]}:{server[1]}, which is not a public address.")
+						continue
+
 					print("Synchronizing server list with " + server[0] + ":" + str(server[1]) + "...")
 
 					# Ping the next server
@@ -3749,7 +3751,7 @@ class ServerList(th.Thread):
 		with self.create_socket(server) as s:
 			server_list = s.server_list()
 			for host, port in server_list:
-				if isinstance(host, str) and isinstance(port, int) and len(self.server_queue) < self.SERVER_LIMIT and is_public_host(host):	# the list comes from another server
+				if isinstance(host, str) and isinstance(port, int) and len(self.server_queue) < self.SERVER_LIMIT:	# the list comes from another server
 					self.server_queue.enqueue((host, port))
 
 
