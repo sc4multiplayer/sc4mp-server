@@ -968,21 +968,22 @@ def set_savegame_filename(savegameX, savegameY, savegameCityName, savegameMayorN
 	
 	else:
 
+		# City and mayor names are shortened so the file name (and the path to it) isn't too long for the file system
 		if savegameCityName:
-			city_name = filter_non_alpha_numeric(savegameCityName)
+			city_name = filter_non_alpha_numeric(savegameCityName)[:64].strip()
 			if len(city_name) < 1:
 				city_name = "New City"
 		else:
 			city_name = "(Error)"
 
 		if savegameMayorName:
-			mayor_name = filter_non_alpha_numeric(savegameMayorName)
+			mayor_name = filter_non_alpha_numeric(savegameMayorName)[:64].strip()
 			if len(mayor_name) < 1:
 				mayor_name = "Defacto"
 		else:
 			mayor_name = "(Error)"
 		
-		return f"{prefix} - {city_name} - {mayor_name}"[:252] + ".sc4"
+		return f"{prefix} - {city_name} - {mayor_name}.sc4"
 
 
 def open_upnp_port(port, protocol="TCP", description="Port Forwarding via UPnP"):
