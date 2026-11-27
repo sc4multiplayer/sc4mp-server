@@ -2824,22 +2824,29 @@ class RequestHandler(BaseRequestHandler):
 
 
 	def check_password(self, password):
-		"""Returns whether the password is correct. Only logging in (`ChkPwd` and `Token`) is limited and counted, so players behind the same IP as someone guessing can keep saving and chatting. Guests send no password, so they aren't either."""
+		"""Returns whether the password is correct. Incorrect passwords are counted for every request, but only logging in (`ChkPwd` and `Token`) and requests from unknown users are limited, so players behind the same IP as someone guessing can keep saving and chatting. Guests send no password, so they aren't either."""
 
-		log_in = password and self.command in [COMMAND_CHECK_PASSWORD, COMMAND_TOKEN]
+		# A known user has logged in with `Token` before, which a guesser can't do without the password
+		user_id = self.headers.get('user_id')
+		known_user = False
+		if self.command not in [COMMAND_CHECK_PASSWORD, COMMAND_TOKEN] and isinstance(user_id, str):
+			known_user = "token" in (sc4mp_users_database_manager.get(hashlib.sha256(user_id.encode()).hexdigest()[:32]) or {})
 
 		with sc4mp_password_failures_lock:	# so requests at the same time can't all be checked before their failures are recorded
-			if log_in:
-				self.limit_password_checks()
-			correct = password == sc4mp_config["SECURITY"]["password"]
-			if log_in and not correct:
-				self.password_failed(password)
+			limited = password and not known_user and self.password_checks_limited()
+			if not limited:
+				correct = password == sc4mp_config["SECURITY"]["password"]
+				if password and not correct:
+					self.password_failed(password)
+
+		if limited:
+			self.error("Too many incorrect passwords. Try again later.")
 
 		return correct
 
 
-	def limit_password_checks(self):
-		"""Refuses to check passwords from an IP with too many different incorrect passwords: after 5, each new one has to wait twice as long as the one before (up to an hour)."""
+	def password_checks_limited(self):
+		"""Returns whether passwords from this IP can't be checked yet because of too many different incorrect passwords: after 5, each new one has to wait twice as long as the one before (up to an hour)."""
 
 		ip = self.c.getpeername()[0]
 		with sc4mp_password_failures_lock:
@@ -2848,8 +2855,7 @@ class RequestHandler(BaseRequestHandler):
 				sc4mp_password_failures.pop(ip, None)	# forgotten after a day without incorrect passwords
 				hashes = set()
 			count = len(hashes)
-		if count >= 5 and time.time() < last + min(2 ** (count - 5), 3600):
-			self.error("Too many incorrect passwords. Try again later.")
+		return count >= 5 and time.time() < last + min(2 ** (count - 5), 3600)
 
 
 	def password_failed(self, password):
