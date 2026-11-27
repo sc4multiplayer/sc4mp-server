@@ -1804,7 +1804,7 @@ class Server(th.Thread):
 		report("Preparing events channel...")
 
 		global sc4mp_event_channel
-		sc4mp_event_channel = EventChannel()
+		sc4mp_event_channel = LimitedEventChannel()
 
 		# Recent chat messages (sent to players when they subscribe), kept in `_Database/chat.jsonl` across restarts, and when each user last sent one
 		global sc4mp_chat_history, sc4mp_chat_times, sc4mp_chat_lock, sc4mp_chat_filter, sc4mp_chat_appended
@@ -2664,6 +2664,46 @@ class FileTablesManager(th.Thread):
 		print("- done.")
 
 
+class LimitedEventChannel(EventChannel):
+	"""Limits the `user_join` events from each address, so one address connecting over and over can't flood everyone's chat. `user_leave` events are only sent for users whose join was."""
+
+
+	MAX_JOINS = 5	# per address per minute
+
+
+	def __init__(self):
+
+		super().__init__()
+
+		self.limit_lock = th.Lock()
+		self.joins = {}	# the times of the recent join events from each address
+		self.joined = set()	# the users whose join was sent
+
+
+	def push(self, event_type: str, event_context: dict, exclude=None):
+
+		if event_type in ('user_join', 'user_leave'):
+
+			event_context = dict(event_context)
+			address = event_context.pop('address', None)
+			user_id = event_context.get('user_id')
+			now = time.time()
+
+			with self.limit_lock:
+				if event_type == 'user_join':
+					self.joins = {a: [t for t in times if t > now - 60] for a, times in self.joins.items() if any(t > now - 60 for t in times)}
+					if len(self.joins.get(address, [])) >= self.MAX_JOINS:
+						return
+					self.joins.setdefault(address, []).append(now)
+					self.joined.add(user_id)
+				else:
+					if user_id not in self.joined:
+						return
+					self.joined.discard(user_id)
+
+		super().push(event_type, event_context, exclude)
+
+
 class RegionsExports():
 	"""Keeps each regions export in its own folder (`_Temp/outbound/Regions-<n>`). Requests pin the export they read from, so a
 	new export never changes files that are still being sent. Old exports are deleted once no request is using them."""
@@ -3261,7 +3301,7 @@ class RequestHandler(BaseRequestHandler):
 
 		subscription_id = sc4mp_event_channel.subscribe(
 			self.user_id, events=chat_history + [welcome],
-			context={'name': self.get_chat_name(self.user_id)}	# so other players' chats can say who joined and left
+			context={'name': self.get_chat_name(self.user_id), 'address': self.c.getpeername()[0]}	# so other players' chats can say who joined and left (the address is only for limiting those events)
 		)
 
 		try:
