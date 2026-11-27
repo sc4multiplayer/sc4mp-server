@@ -1113,7 +1113,7 @@ class Server(th.Thread):
 				sc4mp_system_tray_icon_manager.status("Running", f"Listening on port {SC4MP_PORT}. You may now use the SC4MP Launcher to join.")
 
 			report("- listening for connections...")
-			s.listen(5)
+			s.listen(128)	# enough for bursts of connections, eg. many launchers refreshing the server list at once
 
 			# Stop waiting for a connection every second, since on Windows Ctrl+C can't interrupt the wait
 			s.settimeout(1)
@@ -1152,8 +1152,6 @@ class Server(th.Thread):
 							client_requests[host] += 1
 
 						# report(f"Connection accepted with {host}.")
-
-						self.log_client(c)
 
 						sc4mp_request_threads += 1
 
@@ -2768,6 +2766,9 @@ class RequestHandler(BaseRequestHandler):
 			set_thread_name("ReqThread")
 
 			try:
+
+				# In the request thread rather than the accept loop, since it waits for the clients database
+				sc4mp_server.log_client(self.c)
 
 				self.recv_request()
 
