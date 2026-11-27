@@ -160,7 +160,7 @@ sc4mp_request_threads = 0
 
 sc4mp_system_tray_icon_manager = None
 sc4mp_last_save = None
-sc4mp_password_failures = {}	# the number of incorrect passwords and the time of the last one, by IP, to limit password guessing
+sc4mp_password_failures = {}	# the hashes of the different incorrect passwords and the time of the last one, by IP, to limit password guessing
 sc4mp_password_failures_lock = th.Lock()
 
 
@@ -2816,7 +2816,7 @@ class RequestHandler(BaseRequestHandler):
 				self.limit_password_checks()
 			if password != sc4mp_config["SECURITY"]["password"]:
 				if password:
-					self.password_failed()
+					self.password_failed(password)
 				if self.command in [COMMAND_SUBSCRIBE, COMMAND_CHAT] and guest_chat_enabled():
 					self.user_id = self.authenticate_guest(self.c, self.headers.get('user_id'))
 					return
@@ -2827,22 +2827,28 @@ class RequestHandler(BaseRequestHandler):
 
 
 	def limit_password_checks(self):
-		"""Refuses to check passwords from an IP with too many incorrect passwords: after 5, each one has to wait twice as long as the one before (up to an hour)."""
+		"""Refuses to check passwords from an IP with too many different incorrect passwords: after 5, each new one has to wait twice as long as the one before (up to an hour)."""
 
 		with sc4mp_password_failures_lock:
-			count, last = sc4mp_password_failures.get(self.c.getpeername()[0], (0, 0))
+			hashes, last = sc4mp_password_failures.get(self.c.getpeername()[0], (set(), 0))
+			count = len(hashes)
 		if count >= 5 and time.time() < last + min(2 ** (count - 5), 3600):
 			self.error("Too many incorrect passwords. Try again later.")
 
 
-	def password_failed(self):
+	def password_failed(self, password):
+		"""Records an incorrect password. Only different passwords count, since launchers send their saved password with every request, which is wrong after the password changes."""
 
 		ip = self.c.getpeername()[0]
+		password_hash = hashlib.sha256(str(password).encode()).hexdigest()
 		with sc4mp_password_failures_lock:
-			count, last = sc4mp_password_failures.get(ip, (0, 0))
+			hashes, last = sc4mp_password_failures.get(ip, (set(), 0))
 			if time.time() > last + 86400:
-				count = 0	# forgotten after a day without incorrect passwords
-			sc4mp_password_failures[ip] = (count + 1, time.time())
+				hashes = set()	# forgotten after a day without incorrect passwords
+			if password_hash not in hashes:
+				if len(hashes) < 100:	# enough for the longest wait
+					hashes.add(password_hash)
+				sc4mp_password_failures[ip] = (hashes, time.time())
 
 
 	def authenticate_guest(self, c, user_id):
@@ -3261,7 +3267,7 @@ class RequestHandler(BaseRequestHandler):
 			status = 'success'
 		else:
 			status = 'failure'
-			self.password_failed()
+			self.password_failed(password)
 
 		self.respond(status=status)
 
