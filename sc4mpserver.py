@@ -118,6 +118,7 @@ SC4MP_CONFIG_DEFAULTS = [
 	("PERFORMANCE", [
 		("request_limit", 60),
 		("max_request_threads", 200),
+		("max_ip_request_threads", 20),
 		("connection_timeout", 600),
 		("filetable_update_interval", 600),
 	]),
@@ -1126,9 +1127,9 @@ class Server(th.Thread):
 			client_requests = {}
 			client_requests_cleared = datetime.now()
 
-			# The request threads of each address, so one address can't hold all of them. Enough for a few players behind one address (see `max_ip_users`), each with an event channel subscription and a few requests at once
+			# The request threads of each address, so one address can't hold all of them. The default is enough for a few players behind one address (see `max_ip_users`), each with an event channel subscription and a few requests at once
 			client_threads = {}
-			max_client_threads = None if max_request_threads is None else max(10, max_request_threads // 10)
+			max_client_threads = sc4mp_config["PERFORMANCE"]["max_ip_request_threads"]
 
 			while sc4mp_server_running:
 
@@ -1150,6 +1151,12 @@ class Server(th.Thread):
 
 						c.settimeout(sc4mp_config["PERFORMANCE"]["connection_timeout"])
 
+						threads = [thread for thread in client_threads.get(host, []) if thread.is_alive()]
+						if max_client_threads is not None and len(threads) >= max_client_threads:
+							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + " (too many open connections).")
+							c.close()
+							continue
+
 						if (sc4mp_config["PERFORMANCE"]["request_limit"] is not None and host in client_requests and client_requests[host] >= sc4mp_config["PERFORMANCE"]["request_limit"]):
 							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + ".")
 							c.close()
@@ -1157,12 +1164,6 @@ class Server(th.Thread):
 						else:
 							client_requests.setdefault(host, 0)
 							client_requests[host] += 1
-
-						threads = [thread for thread in client_threads.get(host, []) if thread.is_alive()]
-						if max_client_threads is not None and len(threads) >= max_client_threads:
-							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + " (too many open connections).")
-							c.close()
-							continue
 
 						# report(f"Connection accepted with {host}.")
 
@@ -2784,10 +2785,16 @@ class RequestHandler(BaseRequestHandler):
 
 			try:
 
-				# Connections that don't send their request soon are closed, so they don't hold request threads
+				# Connections that don't send their whole request soon are closed, so they don't hold request threads (the timer also stops connections that send it very slowly, which the socket timeout alone doesn't)
 				timeout = self.c.gettimeout()
-				self.c.settimeout(SC4MP_REQUEST_TIMEOUT if timeout is None else min(timeout, SC4MP_REQUEST_TIMEOUT))
-				self.recv_request()
+				if timeout is None or timeout > SC4MP_REQUEST_TIMEOUT:
+					self.c.settimeout(SC4MP_REQUEST_TIMEOUT)
+				request_timer = th.Timer(SC4MP_REQUEST_TIMEOUT, self.c.shutdown, (socket.SHUT_RDWR,))
+				request_timer.start()
+				try:
+					self.recv_request()
+				finally:
+					request_timer.cancel()
 				self.c.settimeout(timeout)
 
 				# Not pings, which every launcher sends every few seconds, so they'd flood the log
