@@ -76,6 +76,7 @@ SC4MP_BUFFER_SIZE = 4096
 
 SC4MP_DELAY = .1
 SC4MP_FILESTREAM_TIMEOUT = 60	# seconds a launcher sending or receiving files can pause for (eg. while it writes a file), however low `connection_timeout` is
+SC4MP_REQUEST_TIMEOUT = 20	# seconds a connection can take to send its request, however high `connection_timeout` is (which is for the rest, eg. transfers and event subscriptions)
 
 SC4MP_CHAT_MAX_LENGTH = 500
 SC4MP_CHAT_NAME_MAX_LENGTH = 50	# characters of a mayor name shown in chat
@@ -1125,12 +1126,18 @@ class Server(th.Thread):
 			client_requests = {}
 			client_requests_cleared = datetime.now()
 
+			# The request threads of each address, so one address can't hold all of them. Enough for a few players behind one address (see `max_ip_users`), each with an event channel subscription and a few requests at once
+			client_threads = {}
+			max_client_threads = None if max_request_threads is None else max(10, max_request_threads // 10)
+
 			while sc4mp_server_running:
 
 				if datetime.now() >= client_requests_cleared + timedelta(seconds=60):
 
 					client_requests = {}
 					client_requests_cleared = datetime.now()
+
+					client_threads = {host: threads for host, threads in client_threads.items() if any(thread.is_alive() for thread in threads)}
 				
 				if max_request_threads is None or sc4mp_request_threads < max_request_threads:
 
@@ -1151,13 +1158,21 @@ class Server(th.Thread):
 							client_requests.setdefault(host, 0)
 							client_requests[host] += 1
 
+						threads = [thread for thread in client_threads.get(host, []) if thread.is_alive()]
+						if max_client_threads is not None and len(threads) >= max_client_threads:
+							print("[WARNING] Connection blocked from " + str(host) + ":" + str(port) + " (too many open connections).")
+							c.close()
+							continue
+
 						# report(f"Connection accepted with {host}.")
 
 						self.log_client(c)
 
 						sc4mp_request_threads += 1
 
-						RequestHandler(c).start()	
+						thread = RequestHandler(c)
+						client_threads[host] = threads + [thread]
+						thread.start()	
 
 					except Exception as e: #socket.error as e:
 
@@ -2769,7 +2784,11 @@ class RequestHandler(BaseRequestHandler):
 
 			try:
 
+				# Connections that don't send their request soon are closed, so they don't hold request threads
+				timeout = self.c.gettimeout()
+				self.c.settimeout(SC4MP_REQUEST_TIMEOUT if timeout is None else min(timeout, SC4MP_REQUEST_TIMEOUT))
 				self.recv_request()
+				self.c.settimeout(timeout)
 
 				# Not pings, which every launcher sends every few seconds, so they'd flood the log
 				if self.command != "Ping":
