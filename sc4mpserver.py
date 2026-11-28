@@ -2310,7 +2310,7 @@ class RegionsManager(th.Thread):
 							task = self.tasks.pop(0)
 
 							# Read values from tuple
-							save_id, user_id, region, savegame = task
+							save_id, user_id, region, savegame, base_hashcode = task
 
 							report('Processing task "' + save_id + '"...', self)
 
@@ -2396,6 +2396,15 @@ class RegionsManager(th.Thread):
 								# Proceed if save push has not been filtered out
 								if save_id not in self.outputs:
 
+									# Make the deals with neighbours (eg. selling power) the same in this city's and the neighbours' savegames
+									synced_neighbors = []
+									kept_deals = False
+									try:
+										savegame, synced_neighbors, kept_deals = self.sync_neighbor_deals(save_id, region, data, coords, savegame, base_hashcode)
+									except Exception as e:
+										show_error(f"Unable to sync the neighbour deals of \"{savegameCityName}\".\n\n{e}")
+									filename = savegame.filename
+
 									# Delete previous save file if it exists
 									if "filename" in entry and entry["filename"] is not None:
 										previous_filename = os.path.join(sc4mp_server_path, "Regions", region, entry["filename"])
@@ -2463,7 +2472,10 @@ class RegionsManager(th.Thread):
 										}
 									self.outputs[save_id] = "ok"
 
-									# Push channel event
+									# Push channel event. Also to the mayor who pushed it if the server kept some of its deals, so their launcher downloads it
+									exclude = [user_id]
+									if kept_deals:
+										exclude = None
 									sc4mp_event_channel.push(
 										'save', {
 											'user_id': user_id,
@@ -2472,8 +2484,20 @@ class RegionsManager(th.Thread):
 											'coords': (savegameX, savegameY),
 											'filename': entry['filename']
 										},
-										exclude=[user_id]
+										exclude=exclude
 									)
+
+									# And for the neighbours whose deals changed
+									for neighbor_coords in synced_neighbors:
+										sc4mp_event_channel.push(
+											'save', {
+												'user_id': user_id,
+												'save_id': save_id,
+												'region': region,
+												'coords': tuple(int(value) for value in neighbor_coords.split("_")),
+												'filename': data[neighbor_coords]['filename']
+											}
+										)
 
 							except Exception as e:
 
@@ -2553,6 +2577,103 @@ class RegionsManager(th.Thread):
 	def get_mtime(self):
 
 		return os.path.getmtime(os.path.join(sc4mp_server_path, "Regions"))
+
+
+	def sync_neighbor_deals(self, save_id, region, data, coords, savegame, base_hashcode):
+		"""SC4 writes each deal with a neighbour (eg. selling power) in both cities' savegames, and restores the deals either savegame has when it loads a city. It rewrites the neighbours' savegames when saving a city, but only the saved city is pushed, so on the server a deal cancelled in one city would come back from the other's savegame. So the deals with this city in the neighbours' savegames on the server are made the same as in the pushed savegame, like SC4 does.
+
+		The deals the server changed this way in the pushed city since its mayor loaded it (eg. a neighbour cancelled one while they played) aren't in the push, so those are kept as they are on the server, also in the pushed savegame. The launcher sends the md5 of the savegame the game loaded (`base_hashcode`), and if it isn't the server's savegame, or isn't known, the push started from an older one.
+
+		Returns the savegame to store (`savegame`, or a copy with the deals kept), the coordinates of the neighbours whose savegames were changed, and whether deals were kept."""
+
+		entry = data[coords]
+		tile = (savegame.SC4ReadRegionalCity["tileXLocation"], savegame.SC4ReadRegionalCity["tileYLocation"])
+		size = savegame.SC4ReadRegionalCity["citySizeX"]
+
+		def get_neighbor_coords(deal):
+			"""The coordinates of the neighbour in one of this city's deals."""
+			for deal_tile in SC4Savegame.get_neighbor_deal_tiles(deal):
+				if deal_tile != tile:
+					return f"{deal_tile[0]}_{deal_tile[1]}"
+			return None
+
+		deals = savegame.get_neighbor_deals()
+		if deals is None:
+			return savegame, [], False	# eg. a savegame of another version of SC4
+
+		temp_directory = os.path.join(sc4mp_server_path, "_Temp", "inbound", save_id, "neighbor_deals")
+		os.makedirs(temp_directory, exist_ok=True)
+
+		# The neighbours whose deals with this city were changed by the server since this city was last pushed from the server's savegame
+		synced = list(entry.get("synced_deals", []))
+		previous_filename = None
+		if entry.get("filename"):
+			previous_filename = os.path.join(sc4mp_server_path, "Regions", region, entry["filename"])
+		if previous_filename is None or not os.path.exists(previous_filename) or base_hashcode == md5(previous_filename):
+			synced = []
+			entry.pop("synced_deals", None)
+
+		# Keep those deals as they are on the server
+		kept = False
+		if synced:
+			with SC4Savegame(previous_filename, error_callback=show_error) as previous:
+				previous_deals = previous.get_neighbor_deals()
+			if previous_deals is None:
+				return savegame, [], False
+			new_deals = [deal for deal in deals if get_neighbor_coords(deal) not in synced] + [deal for deal in previous_deals if get_neighbor_coords(deal) in synced]
+			if new_deals != deals:
+				kept_filename = os.path.join(temp_directory, "kept.sc4")
+				savegame.save_neighbor_deals(new_deals, kept_filename)
+				savegame.close()
+				savegame = SC4Savegame(kept_filename, error_callback=show_error)
+				savegame.get_SC4ReadRegionalCity()
+				deals = new_deals
+				kept = True
+				report(f"- kept the server's deals with {', '.join(synced)}", self)
+
+		# Make the deals with this city in the neighbours' savegames the same
+		synced_neighbors = []
+		for neighbor_coords, neighbor_entry in data.items():
+			if neighbor_coords == coords or neighbor_coords in synced or not neighbor_entry or not neighbor_entry.get("filename") or not neighbor_entry.get("size"):
+				continue
+			try:
+				x, y = [int(value) for value in neighbor_coords.split("_")]
+			except ValueError:
+				continue
+			neighbor_size = neighbor_entry["size"]
+
+			# Only cities along an edge can make deals
+			beside = (x + neighbor_size == tile[0] or tile[0] + size == x) and y < tile[1] + size and tile[1] < y + neighbor_size
+			above_or_below = (y + neighbor_size == tile[1] or tile[1] + size == y) and x < tile[0] + size and tile[0] < x + neighbor_size
+			if not beside and not above_or_below:
+				continue
+
+			neighbor_filename = os.path.join(sc4mp_server_path, "Regions", region, neighbor_entry["filename"])
+			if not os.path.exists(neighbor_filename):
+				continue
+
+			temp_filename = os.path.join(temp_directory, f"{neighbor_coords}.sc4")
+			with SC4Savegame(neighbor_filename, error_callback=show_error) as neighbor:
+				neighbor.get_SC4ReadRegionalCity()
+				neighbor_deals = neighbor.get_neighbor_deals()
+				if neighbor_deals is None:
+					continue
+				own_deals = [deal for deal in deals if get_neighbor_coords(deal) == neighbor_coords]
+				other_deals = [deal for deal in neighbor_deals if tile not in SC4Savegame.get_neighbor_deal_tiles(deal)]
+				if own_deals == [deal for deal in neighbor_deals if tile in SC4Savegame.get_neighbor_deal_tiles(deal)]:
+					continue
+				neighbor.save_neighbor_deals(other_deals + own_deals, temp_filename)
+			shutil.copy(temp_filename, neighbor_filename)
+
+			# The neighbour's mayor may have the city open, so their next push won't have these deals
+			neighbor_entry["hashcode"] = md5(neighbor_filename)
+			neighbor_synced = neighbor_entry.setdefault("synced_deals", [])
+			if coords not in neighbor_synced:
+				neighbor_synced.append(coords)
+			synced_neighbors.append(neighbor_coords)
+			report(f"- synced the deals of {neighbor_coords} with {coords}", self)
+
+		return savegame, synced_neighbors, kept
 			
 
 class FileTablesManager(th.Thread):
@@ -3011,6 +3132,11 @@ class RequestHandler(BaseRequestHandler):
 		region = sanitize_directory_name(region)
 		file_sizes = [int(file_size) for file_size in file_sizes]
 
+		# The md5's of the savegames the game loaded, which the pushed ones started from (see `RegionsManager.sync_neighbor_deals`). Older launchers don't send them
+		base_hashcodes = self.headers.get('base_hashcodes')
+		if not isinstance(base_hashcodes, list) or len(base_hashcodes) != len(file_sizes):
+			base_hashcodes = [None] * len(file_sizes)
+
 		# Enforce max file count and file sizes
 		error = None
 		if not file_sizes:
@@ -3141,11 +3267,14 @@ class RequestHandler(BaseRequestHandler):
 			# If one savegame remains, pass it to the regions manager, otherwise report to the client that the save push is invalid
 			if len(savegames) == 1:
 
-				# Get the savegame
+				# Get the savegame, and the md5 of the one it started from (the files are named by their order)
 				savegame = savegames[0]
+				base_hashcode = base_hashcodes[int(os.path.splitext(os.path.basename(savegame.filename))[0])]
+				if not isinstance(base_hashcode, str):
+					base_hashcode = None
 
 				# Send the task to the regions manager
-				sc4mp_regions_manager.tasks.append((save_id, user_id, region, savegame))
+				sc4mp_regions_manager.tasks.append((save_id, user_id, region, savegame, base_hashcode))
 
 				# Wait for the output
 				while save_id not in sc4mp_regions_manager.outputs:

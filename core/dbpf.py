@@ -413,6 +413,143 @@ class SC4Savegame(DBPF):
 		return self.cSC4BudgetSimulator
 
 
+	# The neighbour deals (eg. selling power to a neighbour) are near the end of the region view subfile: a count, then the records. Right before the count are a constant (1e-05, as a double) and a zero
+	NEIGHBOR_DEALS_MARKER = bytes.fromhex("00000080b5f8e43e00000000")
+	NEIGHBOR_DEAL_SIZE = 76
+	MAX_NEIGHBOR_DEALS = 1000
+
+
+	def get_region_view_data(self):
+		"""Returns the decompressed region view subfile, cut to the size in its header (the decompression reads a few bytes past the subfile)."""
+
+		self.goto_subfile("ca027edb")
+		header = self.file.read(self.NONSENSE_BYTE_OFFSET)
+		if header[4:6] != b"\x10\xfb":
+			raise ValueError(f"The region view subfile of \"{self.filename}\" isn't compressed.")
+		size = int.from_bytes(header[6:9], "big")
+
+		return self.decompress(self.get_subfile_size("ca027edb")).getvalue()[:size]
+
+
+	def find_neighbor_deals(self, data):
+		"""Returns where the count of neighbour deals is in the region view subfile (`data`) and the deals, or `(None, None)` if they can't be found. Every deal is between this city and a neighbour, so a list with a deal that isn't is the wrong one."""
+
+		city = self.get_SC4ReadRegionalCity()
+		tile = (city["tileXLocation"], city["tileYLocation"])
+
+		start = data.find(self.NEIGHBOR_DEALS_MARKER)
+		while start >= 0:
+			offset = start + len(self.NEIGHBOR_DEALS_MARKER)
+			deals = []
+			if offset + 4 <= len(data):
+				count = struct.unpack_from("<I", data, offset)[0]
+				if count <= self.MAX_NEIGHBOR_DEALS and offset + 4 + count * self.NEIGHBOR_DEAL_SIZE <= len(data):
+					for index in range(count):
+						deal_offset = offset + 4 + index * self.NEIGHBOR_DEAL_SIZE
+						deals.append(data[deal_offset:deal_offset + self.NEIGHBOR_DEAL_SIZE])
+					if all(deal[:2] == b"\x05\x00" and tile in self.get_neighbor_deal_tiles(deal) for deal in deals):
+						return offset, deals
+			start = data.find(self.NEIGHBOR_DEALS_MARKER, start + 1)
+
+		return None, None
+
+
+	def get_neighbor_deals(self):
+		"""Returns the neighbour deals of the city as a list of records (`bytes`), or `None` if they can't be found. SC4 writes each deal in both cities' savegames, the same record in each."""
+
+		_, deals = self.find_neighbor_deals(self.get_region_view_data())
+
+		return deals
+
+
+	@staticmethod
+	def get_neighbor_deal_tiles(deal):
+		"""Returns the tiles of the two cities of a neighbour deal record."""
+
+		return struct.unpack_from("<II", deal, 6), struct.unpack_from("<II", deal, 34)
+
+
+	def save_neighbor_deals(self, deals, filename):
+		"""Writes a copy of the savegame to `filename` with other neighbour deals (records as returned by `get_neighbor_deals`). Only the region view subfile and the directory (which has its decompressed size) change. They're written after the rest of the file, followed by a new index, so every other subfile keeps its bytes and where it is."""
+
+		data = self.get_region_view_data()
+		offset, old_deals = self.find_neighbor_deals(data)
+		if offset is None:
+			raise ValueError(f"The neighbour deals of \"{self.filename}\" can't be found.")
+		data = data[:offset] + struct.pack("<I", len(deals)) + b"".join(deals) + data[offset + 4 + len(old_deals) * self.NEIGHBOR_DEAL_SIZE:]
+
+		self.file.seek(0)
+		original = self.file.read()
+
+		if (self.indexMajorVersion == 7) and (self.indexMinorVersion == 1):
+			id_count = 4
+		else:
+			id_count = 3
+
+		region_view_entry = self.get_indexData_entry_by_type_ID("ca027edb")
+		directory_entry = self.get_indexData_entry_by_type_ID("e86b1eef")
+		if directory_entry is None:
+			raise ValueError(f"\"{self.filename}\" has no directory.")
+
+		# The directory lists the decompressed size of every compressed subfile
+		directory = bytearray(original[directory_entry['offset']:directory_entry['offset'] + directory_entry['filesize']])
+		region_view_key = b"".join(bytes.fromhex(region_view_entry[name])[::-1] for name in ['typeID', 'groupID', 'instanceID', 'instanceID2'][:id_count])
+		directory_entry_size = id_count * 4 + 4
+		found = False
+		for position in range(0, len(directory) - directory_entry_size + 1, directory_entry_size):
+			if directory[position:position + id_count * 4] == region_view_key:
+				directory[position + id_count * 4:position + directory_entry_size] = struct.pack("<I", len(data))
+				found = True
+		if not found:
+			raise ValueError(f"The directory of \"{self.filename}\" doesn't have the region view subfile.")
+
+		# If the savegame was written like this before, replace what was written then instead of adding more
+		end = len(original)
+		if region_view_entry['offset'] + region_view_entry['filesize'] == directory_entry['offset'] and directory_entry['offset'] + directory_entry['filesize'] == self.indexOffset and self.indexOffset + self.indexSize == len(original):
+			end = region_view_entry['offset']
+
+		region_view = self.compress(data)
+		region_view_offset = end
+		directory_offset = region_view_offset + len(region_view)
+		index_offset = directory_offset + len(directory)
+
+		index = b""
+		for entry in self.indexData:
+			key = b"".join(bytes.fromhex(entry[name])[::-1] for name in ['typeID', 'groupID', 'instanceID', 'instanceID2'][:id_count])
+			entry_offset = entry['offset']
+			entry_size = entry['filesize']
+			if entry is region_view_entry:
+				entry_offset = region_view_offset
+				entry_size = len(region_view)
+			elif entry is directory_entry:
+				entry_offset = directory_offset
+				entry_size = len(directory)
+			index += key + struct.pack("<II", entry_offset, entry_size)
+
+		header = bytearray(original[:self.header_end])
+		header[40:48] = struct.pack("<II", index_offset, len(index))
+
+		with open(filename, "wb") as file:
+			file.write(header + original[len(header):end] + region_view + directory + index)
+
+
+	@staticmethod
+	def compress(data):
+		"""Returns `data` QFS compressed in the simplest way, as plain bytes only: a valid compressed subfile, just not a smaller one."""
+
+		compressed = bytearray()
+		position = 0
+		while len(data) - position >= 4:
+			count = min(112, (len(data) - position) // 4 * 4)
+			compressed.append(0xE0 + count // 4 - 1)
+			compressed += data[position:position + count]
+			position += count
+		compressed.append(0xFC + len(data) - position)
+		compressed += data[position:]
+
+		return struct.pack("<I", len(compressed) + 9) + b"\x10\xfb" + len(data).to_bytes(3, "big") + bytes(compressed)
+
+
 if __name__ == "__main__":
 
 	import sys
