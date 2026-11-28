@@ -86,63 +86,63 @@ SC4MP_UPDATE_IDLE_TIME = 30 * 60	# seconds since the last city was saved before 
 
 SC4MP_CONFIG_DEFAULTS = [
 	("NETWORK", [
-		("host", "0.0.0.0"),
-		("port", 7240),
+		("host", "0.0.0.0", "The hostname to bind to the TCP socket (0.0.0.0 for any network adapter, 127.0.0.1 for the local machine only)"),
+		("port", 7240, "The port to bind to the TCP socket (players need it to connect, and it must be forwarded on your router)"),
 		# ("upnp", False),	#TODO
 		# ("domain", None),	#TODO for servers hosted on a DDNS or other specific domain
-		("discoverable", True),
-		("domain", '')
+		("discoverable", True, "True to show your server in the server browser, False to hide it"),
+		("domain", '', "The hostname other servers should use to reach your server, eg. a dynamic DNS hostname (leave empty to use the IP address your server connects from)")
 	]),
 	("INFO", [
-		("server_id", generate_server_id()),
-		("server_name", generate_server_name()),
-		("server_description", "Join and build your city.\n\nRules:\n- Feed the llamas\n- Balance your budget\n- Do uncle Vinny some favors"),
-		("server_url", SC4MP_URL),
+		("server_id", generate_server_id(), "The public ID that lets clients identify your server (if you change it, players can't access their previous claims!)"),
+		("server_name", generate_server_name(), "The name of your server in the server browser"),
+		("server_description", "Join and build your city.\n\nRules:\n- Feed the llamas\n- Balance your budget\n- Do uncle Vinny some favors", "The description of your server in the server browser (start each further line with a tab)"),
+		("server_url", SC4MP_URL, "A URL shown in the server browser as a clickable link (eg. a Discord server, forum post or any other webpage)"),
 	]),
 	("SECURITY", [
-		("private", False),
-		("password_enabled", False),
-		("password", "maxis2003"),
-		("max_ip_users", 3),
+		("private", False, "True to require a user ID and (if enabled) the password to download the plugins and regions, which also hides the server statistics in the server browser"),
+		("password_enabled", False, "True to make players enter the password before connecting to your server"),
+		("password", "maxis2003", "Your server's password"),
+		("max_ip_users", 3, "Maximum number of user profiles allowed on one IP address (None for no limit)"),
 	]),
 	("RULES", [
-		("claim_duration", 30),
+		("claim_duration", 30, "Days after which a claim expires, renewed whenever the player saves the city (None for claims that never expire)"),
 		#("abandoned_reset_delay", None) 	#TODO for resetting old abandoned saves
 		#("claim_timeout", None), 			#TODO prevent users from making another claim within this time
-		("max_region_claims", 1),
+		("max_region_claims", 1, "Maximum number of claims one player can make in a region (None for no limit)"),
 		#("max_total_claims", None), 		#TODO max claims accross entire server
-		("godmode_filter", True),
-		("user_plugins", False),
+		("godmode_filter", True, "True to only let players claim a tile after establishing a city, False to allow claiming tiles in god mode"),
+		("user_plugins", False, "True to let players load their own plugins alongside the server's plugins, False to only allow the server's plugins"),
 	]),
 	("PERFORMANCE", [
-		("request_limit", 60),
-		("max_request_threads", 200),
-		("connection_timeout", 600),
-		("filetable_update_interval", 600),
+		("request_limit", 60, "Maximum number of requests a client can send in one minute (None for no limit)"),
+		("max_request_threads", 200, "Maximum number of request threads running at one time (None for no limit)"),
+		("connection_timeout", 600, "Seconds the server waits for a client that stops responding before closing the connection"),
+		("filetable_update_interval", 600, "Seconds between filetable updates (a higher interval uses less CPU and disk)"),
 	]),
 	("CHAT", [
-		("chat_enabled", True),
-		("chat_history", 1000),		# recent chat messages sent to players when they join
-		("chat_filter", True),		# hide the words in `chat_filter.txt`
-		("chat_motd", ""),		# message of the day, shown in chat to players when they join
-		("chat_motd_interval", 0),	# minutes between showing the message of the day again to everyone online (0 to only show it when players join)
-		("guest_chat", True),		# let players who join without the password chat
+		("chat_enabled", True, "True to let players chat on your server, False to disable the chat"),
+		("chat_history", 1000, "Number of recent chat messages sent to players when they join (0 for none)"),
+		("chat_filter", True, "True to replace the words listed in chat_filter.txt with asterisks in chat, False to disable the filter"),
+		("chat_motd", "", "Message of the day, shown in chat to players when they join (leave empty for none)"),
+		("chat_motd_interval", 0, "Minutes between showing the message of the day again to everyone online (0 to only show it when players join)"),
+		("guest_chat", True, "True to let players who join without the password (guests) chat too, False to only let players with the password chat"),
 	]),
 	("BACKUPS", [
-		("server_backup_interval", 6),
-		("backup_server_on_startup", True),
-		("max_server_backup_days", 30),
-		("max_savegame_backups", 20),
+		("server_backup_interval", 6, "Hours between server backups"),
+		("backup_server_on_startup", True, "True to always back up when the server starts, False to back up only after the backup interval"),
+		("max_server_backup_days", 30, "Days to keep server backups (None to keep them forever)"),
+		("max_savegame_backups", 20, "Maximum number of backups to keep of each savegame (None for no limit)"),
 	]),
 	("UPDATES", [
-		("auto_update", True),
+		("auto_update", True, "True to install new releases automatically, False to update only with the --force-update option (Windows executable only)"),
 	])
 ]
 
 if is_windows() and is_frozen():
 	SC4MP_CONFIG_DEFAULTS += [
 		("UI", [
-			("enabled", True)
+			("enabled", True, "True to show the system tray icon used to manage your server, False to run without it (Windows executable only)")
 		])
 	]
 
