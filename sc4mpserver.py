@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import inspect
 import json
@@ -949,6 +950,19 @@ def fatal_error(e):
 	#sys.exit()
 
 
+def is_disconnect(e):
+	"""Returns whether the exception only means that a connection was closed, was reset or timed out. That's expected (eg. a launcher that was closed, or a port check), so it needs no traceback."""
+
+	# `core.networking` wraps socket errors in a `NetworkException`, and keeps the socket error as its cause
+	for exception in (e, e.__cause__):
+		if isinstance(exception, (ConnectionClosedException, socket.timeout, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+			return True
+		if isinstance(exception, OSError) and exception.errno == errno.ENOTCONN:	# eg. from reading the address of a connection that was reset
+			return True
+
+	return False
+
+
 def get_bitmap_dimensions(filename):
 	"""Returns the width and height of a bitmap file."""
 
@@ -1161,7 +1175,10 @@ class Server(th.Thread):
 
 					except Exception as e: #socket.error as e:
 
-						show_error(e)
+						if is_disconnect(e):
+							print(f"Connection lost. {e}")
+						else:
+							show_error(e)
 			
 				else:
 
@@ -2758,6 +2775,13 @@ class RequestHandler(BaseRequestHandler):
 		# Set by `res_save()`, so its temporary files can be purged if the save is rejected
 		self.save_id = None
 
+		# For the log if the connection ends before its request arrives. Read now, since a connection that was reset has no address anymore
+		self.address = "Unknown address"
+		try:
+			self.address = c.getpeername()[0]
+		except OSError:
+			pass
+
 
 	def run(self):
 
@@ -2789,7 +2813,10 @@ class RequestHandler(BaseRequestHandler):
 
 			except Exception as e:
 
-				show_error(e)
+				if is_disconnect(e):
+					print(f"{self.address} - {e}")
+				else:
+					show_error(e)
 
 			finally:
 
