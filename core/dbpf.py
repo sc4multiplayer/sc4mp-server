@@ -413,6 +413,217 @@ class SC4Savegame(DBPF):
 		return self.cSC4BudgetSimulator
 
 
+	REGION_VIEW_VERSION = (1, 13)
+	PROPERTY_SIZES = {1: 1, 2: 2, 3: 4, 7: 4, 8: 8, 9: 4, 11: 1}	# bytes per value, by value type
+
+
+	def get_region_view_data(self):
+		"""Returns the decompressed region view subfile, cut to the size in its header (the decompression reads a few bytes past the subfile)."""
+
+		self.goto_subfile("ca027edb")
+		header = self.file.read(self.NONSENSE_BYTE_OFFSET)
+		if header[4:6] != b"\x10\xfb":
+			raise ValueError(f"The region view subfile of \"{self.filename}\" isn't compressed.")
+		size = int.from_bytes(header[6:9], "big")
+
+		return self.decompress(self.get_subfile_size("ca027edb")).getvalue()[:size]
+
+
+	def skip(self, data, size):
+		"""Skips `size` bytes, or raises an error if there are fewer left."""
+
+		if len(data.read(size)) != size:
+			raise ValueError("Unexpected end of data.")
+
+
+	def skip_properties(self, data):
+		"""Skips the list of properties of a neighbour connection or deal, or raises an error if it has one that isn't known."""
+
+		if self.read_UL2(data) != 2:
+			raise ValueError("Unknown property list version.")
+		for _ in range(self.read_UL4(data)):
+			self.skip(data, 12)
+			value_type = self.read_UL1(data)
+			key_type = self.read_UL1(data)
+			self.skip(data, 2)
+			if value_type == 12:
+				self.skip(data, self.read_UL4(data))
+			elif key_type == 0x80:
+				self.skip(data, self.read_UL4(data) * self.PROPERTY_SIZES[value_type])
+			else:
+				self.skip(data, self.PROPERTY_SIZES[value_type])
+
+
+	def read_region_view(self):
+		"""Reads the region view subfile to its end and returns what the server needs of it to keep neighbours in sync, as a dictionary, or `None` if the subfile isn't laid out as expected (so nothing is misread):
+
+		- `tile`, `size`, `established`: the city's tile, its size in tiles, and whether it's established
+		- `connections`: the city's connections to its neighbours, as `(type, x, z)` (the cell just outside the city's edge)
+		- `pending`: the connection changes waiting for the city, 13 bytes each (type, `x`, `z`, added or removed). SC4 adds one to a neighbour when a connection to it is made or removed, and builds or removes the neighbour's end when that city is loaded
+		- `deals`: two lists of neighbour deal records (eg. selling power). When SC4 saves a city, it writes the neighbour's deals with other cities in its first list and its deals with the saved city in its second, the same records as in the saved city
+		- `data` and the `pending_range` and `deals_range` in it, for `write_region_view`"""
+
+		raw = self.get_region_view_data()
+		data = io.BytesIO(raw)
+		region_view = {"data": raw, "connections": [], "pending": [], "deals": [[], []]}
+
+		try:
+
+			if (self.read_UL2(data), self.read_UL2(data)) != self.REGION_VIEW_VERSION:
+				return None
+
+			region_view["tile"] = (self.read_UL4(data), self.read_UL4(data))
+			region_view["size"] = (self.read_UL4(data), self.read_UL4(data))
+
+			# Population, mayor rating, difficulty and so on
+			self.skip(data, 43)
+			region_view["established"] = self.read_UL1(data) != 0
+
+			# City name, mayor name, description and so on
+			for _ in range(7):
+				self.skip(data, self.read_UL4(data))
+			self.skip(data, 16)
+
+			# Three lists of populations, and the tax rates
+			for _ in range(3):
+				self.skip(data, self.read_UL4(data) * 8)
+			self.skip(data, self.read_UL4(data) * 4)
+
+			# Connections
+			for _ in range(self.read_UL4(data)):
+				if self.read_UL2(data) != 1:
+					return None
+				region_view["connections"].append(struct.unpack("<Iii", data.read(12)))
+				self.skip(data, 9)
+				self.skip_properties(data)
+
+			# Pending connection changes
+			start = data.tell()
+			for _ in range(self.read_UL4(data)):
+				change = data.read(13)
+				if len(change) != 13:
+					return None
+				region_view["pending"].append(change)
+			region_view["pending_range"] = (start, data.tell())
+
+			# Budget and income, then what the city produces, imports and so on
+			self.skip(data, 16)
+			self.skip(data, self.read_UL4(data) * 44)
+
+			# Neighbour deals
+			start = data.tell()
+			for deals in region_view["deals"]:
+				for _ in range(self.read_UL4(data)):
+					deal_start = data.tell()
+					if self.read_UL2(data) != 5:
+						return None
+					self.skip(data, 64)
+					self.skip_properties(data)
+					self.skip(data, 4)
+					deals.append(raw[deal_start:data.tell()])
+			region_view["deals_range"] = (start, data.tell())
+
+			# Airports and seaports. SC4 can leave old bytes after them, which stay as they are
+			for _ in range(self.read_UL4(data)):
+				self.skip(data, 4)
+				self.skip(data, self.read_UL4(data) * 12)
+
+		except (struct.error, ValueError, KeyError):
+
+			return None
+
+		return region_view
+
+
+	@staticmethod
+	def get_neighbor_deal_tiles(deal):
+		"""Returns the two tiles of a neighbour deal record: one in each city."""
+
+		return struct.unpack_from("<ii", deal, 6), struct.unpack_from("<ii", deal, 34)
+
+
+	def write_region_view(self, region_view, filename):
+		"""Writes a copy of the savegame to `filename` with the `pending` connection changes and the `deals` of `region_view` (as returned by `read_region_view`). Only the region view subfile and the directory (which has its decompressed size) change. They're written after the rest of the file, followed by a new index, so every other subfile keeps its bytes and where it is."""
+
+		pending = struct.pack("<I", len(region_view["pending"])) + b"".join(region_view["pending"])
+		deals = b""
+		for deals_list in region_view["deals"]:
+			deals += struct.pack("<I", len(deals_list)) + b"".join(deals_list)
+		data = region_view["data"]
+		data = data[:region_view["pending_range"][0]] + pending + data[region_view["pending_range"][1]:region_view["deals_range"][0]] + deals + data[region_view["deals_range"][1]:]
+
+		self.file.seek(0)
+		original = self.file.read()
+
+		if (self.indexMajorVersion == 7) and (self.indexMinorVersion == 1):
+			id_count = 4
+		else:
+			id_count = 3
+
+		region_view_entry = self.get_indexData_entry_by_type_ID("ca027edb")
+		directory_entry = self.get_indexData_entry_by_type_ID("e86b1eef")
+		if directory_entry is None:
+			raise ValueError(f"\"{self.filename}\" has no directory.")
+
+		# The directory lists the decompressed size of every compressed subfile
+		directory = bytearray(original[directory_entry['offset']:directory_entry['offset'] + directory_entry['filesize']])
+		region_view_key = b"".join(bytes.fromhex(region_view_entry[name])[::-1] for name in ['typeID', 'groupID', 'instanceID', 'instanceID2'][:id_count])
+		directory_entry_size = id_count * 4 + 4
+		found = False
+		for position in range(0, len(directory) - directory_entry_size + 1, directory_entry_size):
+			if directory[position:position + id_count * 4] == region_view_key:
+				directory[position + id_count * 4:position + directory_entry_size] = struct.pack("<I", len(data))
+				found = True
+		if not found:
+			raise ValueError(f"The directory of \"{self.filename}\" doesn't have the region view subfile.")
+
+		# If the savegame was written like this before, replace what was written then instead of adding more
+		end = len(original)
+		if region_view_entry['offset'] + region_view_entry['filesize'] == directory_entry['offset'] and directory_entry['offset'] + directory_entry['filesize'] == self.indexOffset and self.indexOffset + self.indexSize == len(original):
+			end = region_view_entry['offset']
+
+		compressed = self.compress(data)
+		region_view_offset = end
+		directory_offset = region_view_offset + len(compressed)
+		index_offset = directory_offset + len(directory)
+
+		index = b""
+		for entry in self.indexData:
+			key = b"".join(bytes.fromhex(entry[name])[::-1] for name in ['typeID', 'groupID', 'instanceID', 'instanceID2'][:id_count])
+			entry_offset = entry['offset']
+			entry_size = entry['filesize']
+			if entry is region_view_entry:
+				entry_offset = region_view_offset
+				entry_size = len(compressed)
+			elif entry is directory_entry:
+				entry_offset = directory_offset
+				entry_size = len(directory)
+			index += key + struct.pack("<II", entry_offset, entry_size)
+
+		header = bytearray(original[:self.header_end])
+		header[40:48] = struct.pack("<II", index_offset, len(index))
+
+		with open(filename, "wb") as file:
+			file.write(header + original[len(header):end] + compressed + directory + index)
+
+
+	@staticmethod
+	def compress(data):
+		"""Returns `data` QFS compressed in the simplest way, as plain bytes only: a valid compressed subfile, just not a smaller one."""
+
+		compressed = bytearray()
+		position = 0
+		while len(data) - position >= 4:
+			count = min(112, (len(data) - position) // 4 * 4)
+			compressed.append(0xE0 + count // 4 - 1)
+			compressed += data[position:position + count]
+			position += count
+		compressed.append(0xFC + len(data) - position)
+		compressed += data[position:]
+
+		return struct.pack("<I", len(compressed) + 9) + b"\x10\xfb" + len(data).to_bytes(3, "big") + bytes(compressed)
+
+
 if __name__ == "__main__":
 
 	import sys

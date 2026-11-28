@@ -2310,7 +2310,7 @@ class RegionsManager(th.Thread):
 							task = self.tasks.pop(0)
 
 							# Read values from tuple
-							save_id, user_id, region, savegame = task
+							save_id, user_id, region, savegame, base_hashcode = task
 
 							report('Processing task "' + save_id + '"...', self)
 
@@ -2396,6 +2396,15 @@ class RegionsManager(th.Thread):
 								# Proceed if save push has not been filtered out
 								if save_id not in self.outputs:
 
+									# Give the neighbours' savegames this city's deals with them (eg. selling power) and their end of its connections, like SC4 does
+									synced_neighbors = []
+									kept_deals = False
+									try:
+										savegame, synced_neighbors, kept_deals = self.sync_neighbors(save_id, region, data, coords, savegame, base_hashcode)
+									except Exception as e:
+										show_error(f"Unable to sync the neighbours of \"{savegameCityName}\".\n\n{e}")
+									filename = savegame.filename
+
 									# Delete previous save file if it exists
 									if "filename" in entry and entry["filename"] is not None:
 										previous_filename = os.path.join(sc4mp_server_path, "Regions", region, entry["filename"])
@@ -2463,7 +2472,10 @@ class RegionsManager(th.Thread):
 										}
 									self.outputs[save_id] = "ok"
 
-									# Push channel event
+									# Push channel event. Also to the mayor who pushed it if the server kept something in it (see `sync_neighbors`), so their launcher downloads it
+									exclude = [user_id]
+									if kept_deals:
+										exclude = None
 									sc4mp_event_channel.push(
 										'save', {
 											'user_id': user_id,
@@ -2472,8 +2484,20 @@ class RegionsManager(th.Thread):
 											'coords': (savegameX, savegameY),
 											'filename': entry['filename']
 										},
-										exclude=[user_id]
+										exclude=exclude
 									)
+
+									# And for the neighbours the server changed
+									for neighbor_coords in synced_neighbors:
+										sc4mp_event_channel.push(
+											'save', {
+												'user_id': user_id,
+												'save_id': save_id,
+												'region': region,
+												'coords': tuple(int(value) for value in neighbor_coords.split("_")),
+												'filename': data[neighbor_coords]['filename']
+											}
+										)
 
 							except Exception as e:
 
@@ -2553,6 +2577,209 @@ class RegionsManager(th.Thread):
 	def get_mtime(self):
 
 		return os.path.getmtime(os.path.join(sc4mp_server_path, "Regions"))
+
+
+	def sync_neighbors(self, save_id, region, data, coords, savegame, base_hashcode):
+		"""When SC4 saves a city, it also rewrites the neighbours' savegames: their deals with the saved city (eg. buying its power), and the connections (eg. a power line) made or removed at their border, which SC4 builds or removes on their side when they're next loaded. Only the saved city is pushed, so on the server a deal cancelled in one city would come back from the other's savegame, and a neighbour would never get its end of a connection. So the server makes the same changes to the neighbours' savegames, worked out from the pushed savegame only.
+
+		What the server changed this way in the pushed city since its mayor loaded it (eg. a neighbour cancelled a deal while they played) isn't in the push, so that's kept as it is on the server, also in the pushed savegame. The launcher sends the md5 of the savegame the game loaded (`base_hashcode`), and if it isn't the server's savegame, or isn't known, the push started from an older one.
+
+		Returns the savegame to store (`savegame`, or a copy with what was kept), the coordinates of the neighbours whose savegames were changed, and whether anything was kept."""
+
+		entry = data[coords]
+
+		region_view = savegame.read_region_view()
+		if region_view is None:
+			report(f"- unable to read the region view of {coords}, so its neighbours aren't synced", self)
+			return savegame, [], False	# eg. a savegame of another version of SC4
+		tile = region_view["tile"]
+		size = region_view["size"][0]
+
+		# The cities of the region, to find the city a tile is in
+		cities = []
+		for city_coords, city_entry in data.items():
+			try:
+				x, y = [int(value) for value in city_coords.split("_")]
+			except ValueError:
+				continue
+			if city_coords != coords and city_entry and city_entry.get("filename") and city_entry.get("size"):
+				cities.append((city_coords, x, y, city_entry["size"]))
+		cities.append((coords, tile[0], tile[1], size))
+
+		def get_city_coords(x, y):
+			"""The coordinates of the city a tile is in."""
+			for city_coords, city_x, city_y, city_size in cities:
+				if city_x <= x < city_x + city_size and city_y <= y < city_y + city_size:
+					return city_coords
+			return None
+
+		def get_deal_coords(deal):
+			"""The coordinates of the other city of one of this city's deals, or `None` if it isn't a deal between this city and another."""
+			deal_cities = [get_city_coords(tile_x, tile_y) for tile_x, tile_y in SC4Savegame.get_neighbor_deal_tiles(deal)]
+			if coords not in deal_cities:
+				return None
+			for deal_coords in deal_cities:
+				if deal_coords != coords:
+					return deal_coords
+			return None
+
+		def get_neighbor_cell(connection, neighbor_x, neighbor_y, neighbor_size):
+			"""The cell of the neighbour's end of one of this city's connections (`x` and `z` are the cell just outside this city's edge, so the neighbour's is the one just inside it, seen from the neighbour), or `None` if the connection doesn't go to that neighbour."""
+			_, x, z = connection
+			inner_x = min(max(x, 0), size * 64 - 1)
+			inner_z = min(max(z, 0), size * 64 - 1)
+			if (inner_x == x) == (inner_z == z):
+				return None	# not at an edge, or at a corner
+			neighbor_cell_x = (tile[0] - neighbor_x) * 64 + inner_x
+			neighbor_cell_z = (tile[1] - neighbor_y) * 64 + inner_z
+			beside = neighbor_cell_x in (-1, neighbor_size * 64) and 0 <= neighbor_cell_z < neighbor_size * 64
+			above_or_below = neighbor_cell_z in (-1, neighbor_size * 64) and 0 <= neighbor_cell_x < neighbor_size * 64
+			if not beside and not above_or_below:
+				return None
+			return neighbor_cell_x, neighbor_cell_z
+
+		temp_directory = os.path.join(sc4mp_server_path, "_Temp", "inbound", save_id, "neighbors")
+		os.makedirs(temp_directory, exist_ok=True)
+
+		# The server's savegame of this city, and the neighbours whose deals with it the server changed since it was last pushed from the server's savegame
+		synced = list(entry.get("synced_deals", []))
+		previous_region_view = None
+		started_from_server = True
+		if entry.get("filename"):
+			previous_filename = os.path.join(sc4mp_server_path, "Regions", region, entry["filename"])
+			if os.path.exists(previous_filename):
+				started_from_server = base_hashcode == md5(previous_filename)
+				with SC4Savegame(previous_filename, error_callback=show_error) as previous:
+					previous_region_view = previous.read_region_view()
+				if previous_region_view is None:
+					report(f"- unable to read the region view of the server's savegame of {coords}, so its neighbours aren't synced", self)
+					return savegame, [], False
+		if started_from_server:
+			synced = []
+			entry.pop("synced_deals", None)
+
+		# Keep those deals as they are on the server, and the connection changes still waiting for this city there (the game makes them when it loads the city, so the ones it hasn't made yet are the ones it didn't load)
+		kept = False
+		if not started_from_server:
+			deals = [[deal for deal in deals_list if get_deal_coords(deal) not in synced] for deals_list in region_view["deals"]]
+			deals[1] += [deal for deal in previous_region_view["deals"][0] + previous_region_view["deals"][1] if get_deal_coords(deal) in synced]
+			pending = list(region_view["pending"])
+			for change in previous_region_view["pending"]:
+				connection_type, x, z, added = struct.unpack("<IiiB", change)
+				if change not in pending and ((connection_type, x, z) in region_view["connections"]) != (added != 0):
+					pending.append(change)
+			if deals != region_view["deals"] or pending != region_view["pending"]:
+				region_view["deals"] = deals
+				region_view["pending"] = pending
+				kept_filename = os.path.join(temp_directory, "kept.sc4")
+				savegame.write_region_view(region_view, kept_filename)
+				with SC4Savegame(kept_filename, error_callback=show_error) as kept_savegame:
+					if kept_savegame.read_region_view() is None:
+						raise ServerException("The savegame can't be read with what was kept.")
+				savegame.close()
+				savegame = SC4Savegame(kept_filename, error_callback=show_error)
+				savegame.get_SC4ReadRegionalCity()
+				kept = True
+				report(f"- kept what the server changed in {coords} since it was loaded", self)
+
+		# The connections this city is about to lose (a neighbour removed its end), which the neighbours shouldn't get back
+		removing = []
+		for change in region_view["pending"]:
+			connection_type, x, z, added = struct.unpack("<IiiB", change)
+			if (connection_type, x, z) in removing:
+				removing.remove((connection_type, x, z))
+			if not added:
+				removing.append((connection_type, x, z))
+
+		# The connections removed in this city since it was last pushed. Not the ones without a network (eg. ferries), which SC4 would add instead
+		removed_connections = []
+		if previous_region_view is not None:
+			removed_connections = [connection for connection in previous_region_view["connections"] if connection not in region_view["connections"] and connection[0] in (1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12)]
+
+		synced_neighbors = []
+		for neighbor_coords, x, y, neighbor_size in cities:
+
+			# Only cities along an edge can have deals and connections
+			beside = (x + neighbor_size == tile[0] or tile[0] + size == x) and y < tile[1] + size and tile[1] < y + neighbor_size
+			above_or_below = (y + neighbor_size == tile[1] or tile[1] + size == y) and x < tile[0] + size and tile[0] < x + neighbor_size
+			if neighbor_coords == coords or (not beside and not above_or_below):
+				continue
+
+			neighbor_entry = data[neighbor_coords]
+			neighbor_filename = os.path.join(sc4mp_server_path, "Regions", region, neighbor_entry["filename"])
+			if not os.path.exists(neighbor_filename):
+				continue
+
+			temp_filename = os.path.join(temp_directory, f"{neighbor_coords}.sc4")
+			with SC4Savegame(neighbor_filename, error_callback=show_error) as neighbor:
+
+				neighbor_region_view = neighbor.read_region_view()
+				if neighbor_region_view is None or neighbor_region_view["tile"] != (x, y) or neighbor_region_view["size"][0] != neighbor_size:
+					report(f"- unable to read the region view of {neighbor_coords}, so it isn't synced", self)
+					continue
+
+				# Nothing to do for a city that isn't established: SC4 builds all its neighbours' connections when it is
+				if not neighbor_region_view["established"]:
+					continue
+
+				# Its deals with this city are made the same as this city's deals with it, unless the server's are kept (see above). Like SC4, the deals with other cities go in the first list and the ones with this city in the second
+				synced_deals = False
+				if neighbor_coords not in synced:
+					neighbor_deals = neighbor_region_view["deals"][0] + neighbor_region_view["deals"][1]
+					own_deals = [deal for deal in region_view["deals"][0] + region_view["deals"][1] if get_deal_coords(deal) == neighbor_coords and struct.unpack_from("<I", deal, 2)[0] in range(0x4773ffe0, 0x4773ffe6)]
+					other_deals = [deal for deal in neighbor_deals if coords not in [get_city_coords(tile_x, tile_y) for tile_x, tile_y in SC4Savegame.get_neighbor_deal_tiles(deal)]]
+					if own_deals != [deal for deal in neighbor_deals if deal not in other_deals]:
+						neighbor_region_view["deals"] = [other_deals, own_deals]
+						synced_deals = True
+
+				# What's waiting for each of its connections: `True` if it has it or is about to get it, `False` if it's about to lose it
+				waiting = {connection: True for connection in neighbor_region_view["connections"]}
+				for change in neighbor_region_view["pending"]:
+					connection_type, cell_x, cell_z, added = struct.unpack("<IiiB", change)
+					waiting[(connection_type, cell_x, cell_z)] = added != 0
+
+				# It gets its end of this city's connections to it, and loses its end of the ones removed in this city. Like SC4, only once per connection made (or already there when the server first syncs it), so what the game couldn't build isn't tried again at every push
+				pending = list(neighbor_region_view["pending"])
+				synced_connections = list(neighbor_entry.get("synced_connections", []))
+				for connections, added in [(region_view["connections"], 1), (removed_connections, 0)]:
+					for connection in connections:
+						neighbor_cell = get_neighbor_cell(connection, x, y, neighbor_size)
+						if neighbor_cell is None or (added and connection in removing):
+							continue
+						neighbor_connection = (connection[0], neighbor_cell[0], neighbor_cell[1])
+						key = f"{connection[0]}_{neighbor_cell[0]}_{neighbor_cell[1]}"
+						if added and previous_region_view is not None and connection in previous_region_view["connections"] and key in synced_connections:
+							continue
+						if waiting.get(neighbor_connection, False) != (added != 0):
+							pending.append(struct.pack("<IiiB", connection[0], neighbor_cell[0], neighbor_cell[1], added))
+							waiting[neighbor_connection] = added != 0
+							if added and key not in synced_connections:
+								synced_connections.append(key)
+
+				if not synced_deals and pending == neighbor_region_view["pending"]:
+					continue
+				neighbor_region_view["pending"] = pending
+				neighbor.write_region_view(neighbor_region_view, temp_filename)
+
+			# Never replace a savegame with one that can't be read
+			with SC4Savegame(temp_filename, error_callback=show_error) as neighbor:
+				if neighbor.read_region_view() is None:
+					report(f"- unable to read the synced savegame of {neighbor_coords}, so it isn't synced", self)
+					continue
+			shutil.copy(temp_filename, neighbor_filename)
+
+			# The neighbour's mayor may have the city open, so their next push won't have these deals
+			neighbor_entry["hashcode"] = md5(neighbor_filename)
+			if synced_connections:
+				neighbor_entry["synced_connections"] = synced_connections
+			if synced_deals:
+				neighbor_synced = neighbor_entry.setdefault("synced_deals", [])
+				if coords not in neighbor_synced:
+					neighbor_synced.append(coords)
+			synced_neighbors.append(neighbor_coords)
+			report(f"- synced {neighbor_coords} with {coords}", self)
+
+		return savegame, synced_neighbors, kept
 			
 
 class FileTablesManager(th.Thread):
@@ -3011,6 +3238,11 @@ class RequestHandler(BaseRequestHandler):
 		region = sanitize_directory_name(region)
 		file_sizes = [int(file_size) for file_size in file_sizes]
 
+		# The md5's of the savegames the game loaded, which the pushed ones started from (see `RegionsManager.sync_neighbors`). Older launchers don't send them
+		base_hashcodes = self.headers.get('base_hashcodes')
+		if not isinstance(base_hashcodes, list) or len(base_hashcodes) != len(file_sizes):
+			base_hashcodes = [None] * len(file_sizes)
+
 		# Enforce max file count and file sizes
 		error = None
 		if not file_sizes:
@@ -3141,11 +3373,14 @@ class RequestHandler(BaseRequestHandler):
 			# If one savegame remains, pass it to the regions manager, otherwise report to the client that the save push is invalid
 			if len(savegames) == 1:
 
-				# Get the savegame
+				# Get the savegame, and the md5 of the one it started from (the files are named by their order)
 				savegame = savegames[0]
+				base_hashcode = base_hashcodes[int(os.path.splitext(os.path.basename(savegame.filename))[0])]
+				if not isinstance(base_hashcode, str):
+					base_hashcode = None
 
 				# Send the task to the regions manager
-				sc4mp_regions_manager.tasks.append((save_id, user_id, region, savegame))
+				sc4mp_regions_manager.tasks.append((save_id, user_id, region, savegame, base_hashcode))
 
 				# Wait for the output
 				while save_id not in sc4mp_regions_manager.outputs:
