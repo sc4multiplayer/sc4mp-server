@@ -83,6 +83,7 @@ SC4MP_CHAT_RATE = (5, 5)	# players can send this many chat messages in this many
 SC4MP_STOP_TIMEOUT = 30	# seconds to wait for a running server to stop before ending it by force
 SC4MP_UPDATE_CHECK_INTERVAL = 6 * 3600	# seconds between update checks while the server runs
 SC4MP_UPDATE_IDLE_TIME = 30 * 60	# seconds since the last city was saved before an update is installed
+SC4MP_FILETABLE_CHECK_INTERVAL = 10	# seconds a file table is used for before its files are checked for changes again
 
 SC4MP_CONFIG_DEFAULTS = [
 	("NETWORK", [
@@ -118,7 +119,6 @@ SC4MP_CONFIG_DEFAULTS = [
 		("request_limit", 60),
 		("max_request_threads", 200),
 		("connection_timeout", 600),
-		("filetable_update_interval", 600),
 	]),
 	("CHAT", [
 		("chat_enabled", True),
@@ -775,6 +775,9 @@ def send_filestream(c, rootpath):
 
 
 def get_file_table(rootpath):
+
+	# Pick up files that were added, changed or deleted since the file table was last checked (eg. plugins)
+	sc4mp_filetables_manager.check(rootpath)
 
 	while sc4mp_server_running:
 		try:
@@ -1751,8 +1754,6 @@ class Server(th.Thread):
 
 			sc4mp_filetables_manager.generate(os.path.join(sc4mp_server_path, "Plugins"))
 
-			sc4mp_filetables_manager.start()
-
 
 	def prep_stop_requests(self):
 
@@ -2555,78 +2556,75 @@ class RegionsManager(th.Thread):
 		return os.path.getmtime(os.path.join(sc4mp_server_path, "Regions"))
 			
 
-class FileTablesManager(th.Thread):
+class FileTablesManager():
 
 
 	def __init__(self):
 
-		super().__init__()
-
 		self.filetables = {}
 		self.checksums = {}	# the md5 of each file by its path, size and modified time, from the last file table of each folder (eg. Regions)
+		self.locks = {}	# a lock for each file table, held while its files are checked for changes
+		self.check_times = {}	# when the files of each file table were last checked for changes
 
 
-	def run(self):
+	def check(self, rootpath):
+		"""Checks the files of a file table for changes, unless they were checked in the last few seconds. Requests call this
+		before they use a file table, so there's no need to check on a timer."""
 
-		try:
+		lock = self.locks.get(rootpath)
+		if lock is None:
+			return	# no file table yet
 
-			while (not sc4mp_server_running):
+		# One check at a time for each file table. Requests for the same file table wait here, then use the checked one. The
+		# lock is not shared with other file tables, so hashing a large new plugin doesn't hold up requests for the regions
+		with lock:
 
-				time.sleep(SC4MP_DELAY)
+			if time.monotonic() - self.check_times[rootpath] < SC4MP_FILETABLE_CHECK_INTERVAL:
+				return
 
-			set_thread_name("FtThread")
+			# Only files with a new size or modified time are hashed. If a file can't be read (eg. it's still being copied),
+			# the current file table is kept until the next check
+			try:
+				filetable = self.scan(rootpath)
+			except Exception as e:
+				show_error(e)
+				self.check_times[rootpath] = time.monotonic()
+				return
 
-			while (sc4mp_server_running):
+			# Report what changed (nothing is printed if nothing did)
+			old_entries = {relpath: (checksum, size) for checksum, size, relpath in self.filetables[rootpath]}
+			new_entries = {relpath: (checksum, size) for checksum, size, relpath in filetable}
+			for relpath in old_entries:
+				if relpath not in new_entries:
+					print(f"Removed deleted file \"{os.path.join(rootpath, relpath)}\" from file table.")
+			for relpath, entry in new_entries.items():
+				if relpath not in old_entries:
+					print(f"Added new file \"{os.path.join(rootpath, relpath)}\" to file table.")
+				elif entry != old_entries[relpath]:
+					print(f"Updated changed file \"{os.path.join(rootpath, relpath)}\" in file table.")
 
-				try:
+			# Replace the file table instead of changing it, since requests may be reading the old one
+			self.filetables[rootpath] = filetable
+			self.check_times[rootpath] = time.monotonic()
 
-					sleep_while_running(sc4mp_config["PERFORMANCE"]["filetable_update_interval"])
-					if sc4mp_server_running:
-						self.update()
-
-				except Exception as e:
-
-					show_error(e)
-
-		except Exception as e:
-	
-			fatal_error(e)	
-	
-
-	def update(self):
-
-		# Loop through all file tables (iterate over a copy since regions exports add and remove them)
-		for rootpath, filetable in list(self.filetables.items()):
-			
-			# Loop through file table and check for missing files and files which have changed size (iterate over a copy since entries are removed)
-			for entry in list(filetable):
-				checksum, size, relpath = entry
-				fullpath = os.path.join(rootpath, relpath)
-				if not os.path.exists(fullpath):
-					filetable.remove(entry)
-					print(f"Removed deleted file \"{fullpath}\" from file table.")
-				elif os.path.getsize(fullpath) != size:
-					filetable.remove(entry)
-					print(f"Removed old file \"{fullpath}\" from file table.")
-
-			# Get all files in rootpath
-			fullpaths = []
-			for path, directories, files in os.walk(rootpath):
-				for file in files:
-					fullpaths.append(os.path.join(path, file))
-
-			# Add new files to the file table
-			relpaths = [entry[2] for entry in filetable]
-			for fullpath in fullpaths:
-				relpath = Path(os.path.relpath(fullpath, rootpath)).as_posix()
-				if not relpath in relpaths:
-					filetable.append((md5(fullpath), os.path.getsize(fullpath), relpath))
-					print(f"Added new file \"{fullpath}\" to file table.")
-				
 
 	def generate(self, rootpath):
 
 		print(f"Generating file table for \"{rootpath}\"...")
+
+		filetable = self.scan(rootpath)
+
+		self.locks[rootpath] = th.Lock()
+		self.check_times[rootpath] = time.monotonic()
+		self.filetables[rootpath] = filetable
+
+		#print(self.filetables[path])
+
+		print("- done.")
+
+
+	def scan(self, rootpath):
+		"""Returns a new file table for the files in a folder."""
 
 		fullpaths = []
 		for path, directories, files in os.walk(rootpath):
@@ -2640,19 +2638,19 @@ class FileTablesManager(th.Thread):
 		filetable = []
 		for fullpath in fullpaths:
 			relpath = Path(os.path.relpath(fullpath, rootpath)).as_posix()
-			stat = os.stat(fullpath)
-			key = (relpath, stat.st_size, stat.st_mtime_ns)
-			checksum = old_checksums.get(key)
-			if checksum is None:
-				checksum = md5(fullpath)
+			try:
+				stat = os.stat(fullpath)
+				key = (relpath, stat.st_size, stat.st_mtime_ns)
+				checksum = old_checksums.get(key)
+				if checksum is None:
+					checksum = md5(fullpath)
+			except FileNotFoundError:
+				continue	# deleted since the folder was listed
 			checksums[key] = checksum
 			filetable.append((checksum, stat.st_size, relpath))
 		self.checksums[kind] = checksums
-		self.filetables[rootpath] = filetable
 
-		#print(self.filetables[path])
-
-		print("- done.")
+		return filetable
 
 
 	def erase(self, rootpath):
@@ -2660,6 +2658,8 @@ class FileTablesManager(th.Thread):
 		print(f"Erasing file table for \"{rootpath}\"...")
 
 		self.filetables.pop(rootpath)
+		self.check_times.pop(rootpath)
+		self.locks.pop(rootpath)
 
 		print("- done.")
 
